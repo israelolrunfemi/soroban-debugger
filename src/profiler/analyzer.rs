@@ -84,7 +84,11 @@ impl GasOptimizer {
         }
     }
 
-    pub fn analyze_function(&mut self, function_name: &str, args: Option<&str>) -> Result<FunctionProfile> {
+    pub fn analyze_function(
+        &mut self,
+        function_name: &str,
+        args: Option<&str>,
+    ) -> Result<FunctionProfile> {
         let host = self.executor.host();
         let budget_start = crate::inspector::budget::BudgetInspector::get_cpu_usage(host);
 
@@ -95,8 +99,12 @@ impl GasOptimizer {
 
         let budget_end = crate::inspector::budget::BudgetInspector::get_cpu_usage(host);
 
-        let total_cpu = budget_end.cpu_instructions.saturating_sub(budget_start.cpu_instructions);
-        let total_memory = budget_end.memory_bytes.saturating_sub(budget_start.memory_bytes);
+        let total_cpu = budget_end
+            .cpu_instructions
+            .saturating_sub(budget_start.cpu_instructions);
+        let total_memory = budget_end
+            .memory_bytes
+            .saturating_sub(budget_start.memory_bytes);
 
         let profile = FunctionProfile {
             name: function_name.to_string(),
@@ -106,13 +114,14 @@ impl GasOptimizer {
             storage_accesses,
         };
 
-        self.function_profiles.insert(function_name.to_string(), profile.clone());
+        self.function_profiles
+            .insert(function_name.to_string(), profile.clone());
         Ok(profile)
     }
 
     pub fn generate_report(&self, contract_path: &str) -> OptimizationReport {
         let functions: Vec<FunctionProfile> = self.function_profiles.values().cloned().collect();
-        
+
         let total_cpu = functions.iter().map(|f| f.total_cpu).sum();
         let total_memory = functions.iter().map(|f| f.total_memory).sum();
 
@@ -131,14 +140,18 @@ impl GasOptimizer {
                 Priority::Medium => 2,
                 Priority::Low => 3,
             };
-            priority_order(&a.priority).cmp(&priority_order(&b.priority))
-            .then_with(|| (a.estimated_cpu_savings + a.estimated_memory_savings)
-                .cmp(&(b.estimated_cpu_savings + b.estimated_memory_savings))
-                .reverse())
+            priority_order(&a.priority)
+                .cmp(&priority_order(&b.priority))
+                .then_with(|| {
+                    (a.estimated_cpu_savings + a.estimated_memory_savings)
+                        .cmp(&(b.estimated_cpu_savings + b.estimated_memory_savings))
+                        .reverse()
+                })
         });
 
         let potential_cpu_savings: u64 = suggestions.iter().map(|s| s.estimated_cpu_savings).sum();
-        let potential_memory_savings: u64 = suggestions.iter().map(|s| s.estimated_memory_savings).sum();
+        let potential_memory_savings: u64 =
+            suggestions.iter().map(|s| s.estimated_memory_savings).sum();
 
         OptimizationReport {
             contract_path: contract_path.to_string(),
@@ -151,7 +164,10 @@ impl GasOptimizer {
         }
     }
 
-    fn analyze_expensive_operations(&self, function: &FunctionProfile) -> Vec<OptimizationSuggestion> {
+    fn analyze_expensive_operations(
+        &self,
+        function: &FunctionProfile,
+    ) -> Vec<OptimizationSuggestion> {
         let mut suggestions = Vec::new();
 
         if function.total_cpu > 1000000 {
@@ -253,60 +269,94 @@ impl GasOptimizer {
         let mut output = String::new();
 
         writeln!(output, "# Gas Optimization Report").unwrap();
-        writeln!(output, "").unwrap();
+        writeln!(output).unwrap();
         writeln!(output, "**Contract:** `{}`", report.contract_path).unwrap();
-        writeln!(output, "").unwrap();
+        writeln!(output).unwrap();
 
         writeln!(output, "## Summary").unwrap();
-        writeln!(output, "").unwrap();
+        writeln!(output).unwrap();
         writeln!(output, "- **Total CPU Instructions:** {}", report.total_cpu).unwrap();
         writeln!(output, "- **Total Memory Bytes:** {}", report.total_memory).unwrap();
-        writeln!(output, "- **Potential CPU Savings:** {}", report.potential_cpu_savings).unwrap();
-        writeln!(output, "- **Potential Memory Savings:** {}", report.potential_memory_savings).unwrap();
-        writeln!(output, "").unwrap();
+        writeln!(
+            output,
+            "- **Potential CPU Savings:** {}",
+            report.potential_cpu_savings
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "- **Potential Memory Savings:** {}",
+            report.potential_memory_savings
+        )
+        .unwrap();
+        writeln!(output).unwrap();
 
         writeln!(output, "## Function Profiles").unwrap();
-        writeln!(output, "").unwrap();
+        writeln!(output).unwrap();
         for function in &report.functions {
             writeln!(output, "### {}", function.name).unwrap();
-            writeln!(output, "").unwrap();
+            writeln!(output).unwrap();
             writeln!(output, "- **CPU Instructions:** {}", function.total_cpu).unwrap();
             writeln!(output, "- **Memory Bytes:** {}", function.total_memory).unwrap();
-            writeln!(output, "").unwrap();
+            writeln!(output).unwrap();
 
             if !function.operations.is_empty() {
                 writeln!(output, "#### Top 5 Most Expensive Operations").unwrap();
-                writeln!(output, "").unwrap();
+                writeln!(output).unwrap();
                 writeln!(output, "| Operation | CPU Cost | Memory Cost | Location |").unwrap();
                 writeln!(output, "|-----------|----------|-------------|----------|").unwrap();
-                
+
                 let mut sorted_ops = function.operations.clone();
-                sorted_ops.sort_by(|a, b| (b.cpu_cost + b.memory_cost).cmp(&(a.cpu_cost + a.memory_cost)));
-                
+                sorted_ops.sort_by(|a, b| {
+                    (b.cpu_cost + b.memory_cost).cmp(&(a.cpu_cost + a.memory_cost))
+                });
+
                 for op in sorted_ops.iter().take(5) {
-                    writeln!(output, "| {} | {} | {} | {} |", op.operation, op.cpu_cost, op.memory_cost, op.location).unwrap();
+                    writeln!(
+                        output,
+                        "| {} | {} | {} | {} |",
+                        op.operation, op.cpu_cost, op.memory_cost, op.location
+                    )
+                    .unwrap();
                 }
-                writeln!(output, "").unwrap();
+                writeln!(output).unwrap();
             }
         }
 
         writeln!(output, "## Optimization Suggestions").unwrap();
-        writeln!(output, "").unwrap();
-        
+        writeln!(output).unwrap();
+
         if report.suggestions.is_empty() {
             writeln!(output, "No optimization suggestions found.").unwrap();
         } else {
             for (idx, suggestion) in report.suggestions.iter().enumerate() {
-                writeln!(output, "### {}. {} [{}]", idx + 1, suggestion.title, suggestion.priority).unwrap();
-                writeln!(output, "").unwrap();
+                writeln!(
+                    output,
+                    "### {}. {} [{}]",
+                    idx + 1,
+                    suggestion.title,
+                    suggestion.priority
+                )
+                .unwrap();
+                writeln!(output).unwrap();
                 writeln!(output, "**Category:** {}", suggestion.category).unwrap();
-                writeln!(output, "").unwrap();
+                writeln!(output).unwrap();
                 writeln!(output, "{}", suggestion.description).unwrap();
-                writeln!(output, "").unwrap();
-                writeln!(output, "- **Estimated CPU Savings:** {}", suggestion.estimated_cpu_savings).unwrap();
-                writeln!(output, "- **Estimated Memory Savings:** {}", suggestion.estimated_memory_savings).unwrap();
+                writeln!(output).unwrap();
+                writeln!(
+                    output,
+                    "- **Estimated CPU Savings:** {}",
+                    suggestion.estimated_cpu_savings
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "- **Estimated Memory Savings:** {}",
+                    suggestion.estimated_memory_savings
+                )
+                .unwrap();
                 writeln!(output, "- **Location:** {}", suggestion.location).unwrap();
-                writeln!(output, "").unwrap();
+                writeln!(output).unwrap();
             }
         }
 

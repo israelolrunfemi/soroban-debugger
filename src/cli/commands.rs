@@ -128,7 +128,10 @@ fn parse_storage(json: &str) -> Result<String> {
 
 /// Execute the optimize command
 pub fn optimize(args: OptimizeArgs) -> Result<()> {
-    println!("Analyzing contract for gas optimization: {:?}", args.contract);
+    println!(
+        "Analyzing contract for gas optimization: {:?}",
+        args.contract
+    );
 
     let wasm_bytes = fs::read(&args.contract)
         .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
@@ -157,11 +160,16 @@ pub fn optimize(args: OptimizeArgs) -> Result<()> {
         println!("  Analyzing function: {}", function_name);
         match optimizer.analyze_function(function_name, args.args.as_deref()) {
             Ok(profile) => {
-                println!("    CPU: {} instructions, Memory: {} bytes", 
-                    profile.total_cpu, profile.total_memory);
+                println!(
+                    "    CPU: {} instructions, Memory: {} bytes",
+                    profile.total_cpu, profile.total_memory
+                );
             }
             Err(e) => {
-                eprintln!("    Warning: Failed to analyze function {}: {}", function_name, e);
+                eprintln!(
+                    "    Warning: Failed to analyze function {}: {}",
+                    function_name, e
+                );
             }
         }
     }
