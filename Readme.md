@@ -296,7 +296,8 @@ at your option.
 
 - Soroban Documentation: https://soroban.stellar.org/docs
 - Stellar Developer Discord: https://discord.gg/stellardev
-- Issue Tracker: https://github.com/yourusername/soroban-debugger/issues
+- Issue Tracker: https://github.com/Timi16/soroban-debugger/issues
+- [CHANGELOG](CHANGELOG.md) - Release history and changes
 
 ## Acknowledgments
 
