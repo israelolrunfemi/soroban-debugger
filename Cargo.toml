@@ -36,12 +36,12 @@ serde_json = "1.0"
 
 # Logging
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
 
 # Utilities
 itertools = "0.12"
 regex = "1.10"
-
+colored = "2.0"
 [dev-dependencies]
 assert_cmd = "2.0"
 predicates = "3.0"
