@@ -4,6 +4,7 @@ pub mod debugger;
 pub mod inspector;
 pub mod profiler;
 pub mod runtime;
+pub mod simulator;
 pub mod ui;
 pub mod utils;
 

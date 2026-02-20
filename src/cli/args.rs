@@ -50,9 +50,21 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub breakpoint: Vec<String>,
 
+    /// Network snapshot file to load before execution
+    #[arg(long)]
+    pub network_snapshot: Option<PathBuf>,
+
     /// Enable verbose output
     #[arg(short, long)]
     pub verbose: bool,
+
+    /// Show contract events emitted during execution
+    #[arg(long)]
+    pub show_events: bool,
+
+    /// Filter events by topic
+    #[arg(long)]
+    pub filter_topic: Option<String>,
 }
 
 #[derive(Parser)]
@@ -60,6 +72,10 @@ pub struct InteractiveArgs {
     /// Path to the contract WASM file
     #[arg(short, long)]
     pub contract: PathBuf,
+
+    /// Network snapshot file to load before starting interactive session
+    #[arg(long)]
+    pub network_snapshot: Option<PathBuf>,
 
     /// Enable verbose output
     #[arg(short, long)]
@@ -102,6 +118,10 @@ pub struct OptimizeArgs {
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
+
+    /// Network snapshot file to load before analysis
+    #[arg(long)]
+    pub network_snapshot: Option<PathBuf>,
 }
 
 #[derive(Parser)]

@@ -117,4 +117,8 @@ impl ContractExecutor {
             DebuggerError::InvalidArguments(e.to_string()).into()
         })
     }
+    /// Get events captured during execution
+    pub fn get_events(&self) -> Result<Vec<crate::inspector::events::ContractEvent>> {
+        crate::inspector::events::EventInspector::get_events(self.env.host())
+    }
 }
