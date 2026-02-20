@@ -185,6 +185,64 @@ soroban-debug run --contract complex.wasm --function expensive_operation
 > Warning: High CPU usage detected
 ```
 
+## Supported Argument Types
+
+The debugger supports passing typed arguments to contract functions via the `--args` flag. You can use **bare values** for quick usage or **type annotations** for precise control.
+
+### Bare Values (Default Types)
+
+| JSON Value     | Soroban Type | Example               |
+|----------------|-------------|------------------------|
+| Number         | `i128`      | `10`, `-5`, `999`      |
+| String         | `Symbol`    | `"hello"`              |
+| Boolean        | `Bool`      | `true`, `false`        |
+| Array          | `Vec<Val>`  | `[1, 2, 3]`           |
+| Object         | `Map`       | `{"key": "value"}`     |
+
+```bash
+# Bare values (numbers default to i128, strings to Symbol)
+soroban-debug run --contract counter.wasm --function add --args '[10]'
+soroban-debug run --contract token.wasm --function transfer --args '["Alice", "Bob", 100]'
+```
+
+### Type Annotations
+
+For precise type control, use `{"type": "<type>", "value": <value>}`:
+
+| Type     | Description               | Example                                    |
+|----------|---------------------------|--------------------------------------------|
+| `u32`    | Unsigned 32-bit integer   | `{"type": "u32", "value": 42}`             |
+| `i32`    | Signed 32-bit integer     | `{"type": "i32", "value": -5}`             |
+| `u64`    | Unsigned 64-bit integer   | `{"type": "u64", "value": 1000000}`        |
+| `i64`    | Signed 64-bit integer     | `{"type": "i64", "value": -999}`           |
+| `u128`   | Unsigned 128-bit integer  | `{"type": "u128", "value": 100}`           |
+| `i128`   | Signed 128-bit integer    | `{"type": "i128", "value": -100}`          |
+| `bool`   | Boolean value             | `{"type": "bool", "value": true}`          |
+| `symbol` | Soroban Symbol (≤32 chars)| `{"type": "symbol", "value": "hello"}`     |
+| `string` | Soroban String (any len)  | `{"type": "string", "value": "long text"}` |
+
+```bash
+# Typed arguments for precise control
+soroban-debug run --contract counter.wasm --function add --args '[{"type": "u32", "value": 10}]'
+
+# Mixed typed and bare values
+soroban-debug run --contract token.wasm --function transfer \
+  --args '[{"type": "symbol", "value": "Alice"}, {"type": "symbol", "value": "Bob"}, {"type": "u64", "value": 100}]'
+
+# Soroban String for longer text
+soroban-debug run --contract dao.wasm --function create_proposal \
+  --args '[{"type": "string", "value": "My proposal title"}]'
+```
+
+### Error Handling
+
+The parser provides clear error messages for common issues:
+
+- **Unsupported type**: `Unsupported type: bytes. Supported types: u32, i32, u64, i64, u128, i128, bool, string, symbol`
+- **Out of range**: `Value out of range for type u32: 5000000000 (valid range: 0..=4294967295)`
+- **Type mismatch**: `Type/value mismatch: expected u32 (non-negative integer) but got "hello"`
+- **Invalid JSON**: `JSON parsing error: ...`
+
 ## Interactive Commands Reference
 
 During an interactive debugging session, you can use:
