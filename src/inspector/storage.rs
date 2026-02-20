@@ -108,13 +108,13 @@ impl StorageInspector {
     /// Display storage in a readable format (no filtering)
     pub fn display(&self) {
         if self.storage.is_empty() {
-            println!("Storage: (empty)");
+            tracing::info!("Storage is empty");
             return;
         }
 
-        println!("Storage:");
+        tracing::info!(entries = self.storage.len(), "Storage entries");
         for (key, value) in &self.storage {
-            println!("  {} = {}", key, value);
+            tracing::debug!(key, value, "Storage entry");
         }
     }
 
@@ -139,6 +139,16 @@ impl StorageInspector {
         for key in keys {
             if filter.matches(key) {
                 println!("  {} = {}", key, self.storage[key]);
+            tracing::info!("Storage is empty");
+            return;
+        }
+
+        let mut matched = 0;
+        let keys: Vec<&String> = self.storage.keys().collect();
+
+        for key in keys {
+            if filter.matches(key) {
+                tracing::debug!(key, value = self.storage[key], "Filtered storage entry");
                 matched += 1;
             }
         }
@@ -151,6 +161,16 @@ impl StorageInspector {
             let total = self.storage.len();
             println!("\n  Showing {}/{} entries", matched, total);
         }
+            tracing::info!("No storage entries matched the filter");
+        }
+
+        let total = self.storage.len();
+        tracing::info!(
+            matched = matched,
+            total = total,
+            filter = filter.summary(),
+            "Storage filtering complete"
+        );
     }
 
     /// Get filtered storage entries as a new HashMap

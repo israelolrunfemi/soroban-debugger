@@ -21,6 +21,11 @@ impl ContractExecutor {
         let env = Env::default();
         let _ = env.host().set_diagnostic_level(DiagnosticLevel::Debug);
 
+        // Enable diagnostic events
+        env.host()
+            .set_diagnostic_level(DiagnosticLevel::Debug)
+            .expect("Failed to set diagnostic level");
+
         // Register the contract with the WASM
         let contract_address = env.register(wasm.as_slice(), ());
 
@@ -178,5 +183,15 @@ impl ContractExecutor {
         }
 
         address.to_string()
+    /// Get diagnostic events from the host
+    pub fn get_diagnostic_events(&self) -> Result<Vec<soroban_env_host::xdr::ContractEvent>> {
+        Ok(self
+            .env
+            .host()
+            .get_diagnostic_events()?
+            .0
+            .into_iter()
+            .map(|he| he.event)
+            .collect())
     }
 }

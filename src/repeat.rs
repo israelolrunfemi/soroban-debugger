@@ -4,6 +4,10 @@ use crate::runtime::executor::ContractExecutor;
 use crate::Result;
 use std::time::{Duration, Instant};
 use tracing::info;
+use crate::logging;
+use crate::runtime::executor::ContractExecutor;
+use crate::Result;
+use std::time::{Duration, Instant};
 
 /// Stats captured from a single execution run.
 #[derive(Debug, Clone)]
@@ -155,10 +159,41 @@ impl AggregateStats {
             println!("║  ✓ All runs produced consistent results  ║");
         }
         println!("╚══════════════════════════════════════════╝");
+
+        // Log aggregate statistics with structured fields
+        tracing::info!(
+            runs = n,
+            min_duration_ms = self.min_duration.as_secs_f64() * 1000.0,
+            max_duration_ms = self.max_duration.as_secs_f64() * 1000.0,
+            avg_duration_ms = self.avg_duration.as_secs_f64() * 1000.0,
+            min_cpu = self.min_cpu,
+            max_cpu = self.max_cpu,
+            avg_cpu = self.avg_cpu,
+            min_memory = self.min_memory,
+            max_memory = self.max_memory,
+            avg_memory = self.avg_memory,
+            inconsistent = self.inconsistent_results,
+            "Repeat run summary"
+        );
+
+        // Log individual inconsistent results if any
+        if self.inconsistent_results {
+            let first = &self.runs[0].result;
+            for run in &self.runs {
+                if run.result != *first {
+                    tracing::warn!(
+                        iteration = run.iteration,
+                        result = %run.result,
+                        "Inconsistent result detected"
+                    );
+                }
+            }
+        }
     }
 }
 
 /// Truncate a string to `max_len` characters, adding "…" if truncated.
+#[allow(dead_code)]
 fn truncate(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         s.to_string()
@@ -191,12 +226,18 @@ impl RepeatRunner {
     /// Run the contract function `n` times and return aggregate stats.
     pub fn run(&self, function: &str, args: Option<&str>, n: u32) -> Result<AggregateStats> {
         println!("Running {} iteration(s) of '{}'...\n", n, function);
+        logging::log_repeat_execution(function, n as usize);
 
         let mut all_runs = Vec::with_capacity(n as usize);
 
         for i in 1..=n {
             info!("Repeat run {}/{}", i, n);
             println!("--- Run {}/{} ---", i, n);
+            tracing::debug!(
+                iteration = i,
+                total = n,
+                "Starting repeat execution iteration"
+            );
 
             // Fresh executor and engine per run for isolation
             let mut executor = ContractExecutor::new(self.wasm_bytes.clone())?;
@@ -219,6 +260,12 @@ impl RepeatRunner {
                 duration.as_secs_f64() * 1000.0,
                 budget.cpu_instructions,
                 budget.memory_bytes,
+            tracing::debug!(
+                iteration = i,
+                duration_ms = duration.as_secs_f64() * 1000.0,
+                cpu = budget.cpu_instructions,
+                memory = budget.memory_bytes,
+                "Iteration complete"
             );
 
             all_runs.push(RunStats {
