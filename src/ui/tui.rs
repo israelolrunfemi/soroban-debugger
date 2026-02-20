@@ -1,5 +1,5 @@
 use crate::debugger::engine::DebuggerEngine;
-use crate::inspector::{BudgetInspector, CallStackInspector, StorageInspector};
+use crate::inspector::{BudgetInspector, StorageInspector};
 use crate::Result;
 use std::io::{self, Write};
 
@@ -7,7 +7,6 @@ use std::io::{self, Write};
 pub struct DebuggerUI {
     engine: DebuggerEngine,
     storage_inspector: StorageInspector,
-    stack_inspector: CallStackInspector,
 }
 
 impl DebuggerUI {
@@ -15,7 +14,6 @@ impl DebuggerUI {
         Ok(Self {
             engine,
             storage_inspector: StorageInspector::new(),
-            stack_inspector: CallStackInspector::new(),
         })
     }
 
@@ -73,7 +71,7 @@ impl DebuggerUI {
                 self.storage_inspector.display();
             }
             "stack" => {
-                self.stack_inspector.display();
+                self.engine.state().call_stack().display();
             }
             "budget" => {
                 BudgetInspector::display(self.engine.executor().host());
@@ -129,6 +127,11 @@ impl DebuggerUI {
         } else {
             tracing::info!(steps = steps, paused = paused, "Current execution state");
         }
+        println!("Steps: {}", self.engine.state().step_count());
+        println!("Paused: {}", self.engine.is_paused());
+
+        println!();
+        self.engine.state().call_stack().display();
     }
 
     /// Print help message
