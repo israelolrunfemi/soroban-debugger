@@ -79,6 +79,9 @@ pub enum Commands {
 
     /// Compare two execution trace JSON files side-by-side
     Compare(CompareArgs),
+
+    /// List exported functions of a contract (shorthand for `inspect --functions`)
+    ListFunctions(ListFunctionsArgs),
 }
 
 #[derive(Parser)]
@@ -167,6 +170,14 @@ pub struct RunArgs {
     /// Path to JSON file containing array of argument sets for batch execution
     #[arg(long)]
     pub batch_args: Option<PathBuf>,
+
+    /// Save execution results to file
+    #[arg(long)]
+    pub save_output: Option<PathBuf>,
+
+    /// Append to output file instead of overwriting
+    #[arg(long, requires = "save_output")]
+    pub append: bool,
 }
 
 impl RunArgs {
@@ -229,6 +240,15 @@ pub struct InspectArgs {
     /// Show contract metadata
     #[arg(long)]
     pub metadata: bool,
+}
+
+/// Args for the `list-functions` shorthand command.
+/// Delegates to `inspect --functions` under the hood.
+#[derive(Parser)]
+pub struct ListFunctionsArgs {
+    /// Path to the contract WASM file
+    #[arg(short, long)]
+    pub contract: PathBuf,
 }
 
 #[derive(Parser)]
