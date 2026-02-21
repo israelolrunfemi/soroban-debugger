@@ -55,5 +55,9 @@ fn test_full_debug_session_walkthrough() {
     
     // Verify execution completion and result
     assert!(stdout.contains("Execution completed"), "Did not complete execution");
-    assert!(stdout.contains("Result: \"I64(1)\""), "Unexpected return value");
+    assert!(stdout.contains("Result: \"I64(1)\""), "Unexpected return value (storage/state check)");
+
+    // Verify budget reporting
+    assert!(stdout.contains("Resource budget"), "Budget info missing");
+    assert!(stdout.contains("cpu_insns="), "CPU budget missing");
 }
