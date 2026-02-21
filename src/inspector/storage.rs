@@ -88,12 +88,18 @@ impl StorageFilter {
 pub struct StorageInspector {
     // Storage will be tracked here
     storage: HashMap<String, String>,
+    // Tracks frequency of key reads
+    reads: HashMap<String, usize>,
+    // Tracks frequency of key writes
+    writes: HashMap<String, usize>,
 }
 
 impl StorageInspector {
     pub fn new() -> Self {
         Self {
             storage: HashMap::new(),
+            reads: HashMap::new(),
+            writes: HashMap::new(),
         }
     }
 
@@ -162,7 +168,111 @@ impl StorageInspector {
 
     /// Insert a storage entry (used for testing and state tracking)
     pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.storage.insert(key.into(), value.into());
+        let k = key.into();
+        let v = value.into();
+        self.storage.insert(k.clone(), v.clone());
+        self.track_write(&k);
+    }
+
+    /// Record a read access for a key
+    pub fn track_read(&mut self, key: &str) {
+        *self.reads.entry(key.to_string()).or_insert(0) += 1;
+    }
+
+    /// Record a write access for a key
+    pub fn track_write(&mut self, key: &str) {
+        *self.writes.entry(key.to_string()).or_insert(0) += 1;
+    }
+
+    /// Analyze access patterns
+    pub fn analyze_access_patterns(&self) -> AccessPatternReport {
+        let mut stats: HashMap<String, AccessStats> = HashMap::new();
+
+        for (k, v) in &self.reads {
+            stats.entry(k.clone()).or_default().reads = *v;
+        }
+
+        for (k, v) in &self.writes {
+            stats.entry(k.clone()).or_default().writes = *v;
+        }
+
+        let mut hot_read_keys = Vec::new();
+        let mut write_heavy_keys = Vec::new();
+        let mut read_never_written = Vec::new();
+
+        for (key, stat) in &stats {
+            if stat.reads > 5 {
+                hot_read_keys.push(key.clone());
+            }
+            if stat.writes > stat.reads {
+                write_heavy_keys.push(key.clone());
+            }
+            if stat.reads > 0 && stat.writes == 0 {
+                read_never_written.push(key.clone());
+            }
+        }
+
+        AccessPatternReport {
+            stats,
+            hot_read_keys,
+            write_heavy_keys,
+            read_never_written,
+        }
+    }
+
+    /// Display visually sorted table of access patterns
+    pub fn display_access_report(&self) {
+        let report = self.analyze_access_patterns();
+        if report.stats.is_empty() {
+            println!("No storage access patterns recorded.");
+            return;
+        }
+
+        println!("\nStorage Access Pattern Report");
+        println!("{:<30} | {:<10} | {:<10} | {:<20}", "Key", "Reads", "Writes", "Notes");
+        println!("{:-<30}-+-{:-<10}-+-{:-<10}-+-{:-<20}", "", "", "", "");
+
+        let mut entries: Vec<_> = report.stats.into_iter().collect();
+        // Sort primarily by highest reads, then highest writes, then alphabetically
+        entries.sort_by(|a, b| {
+            b.1.reads
+                .cmp(&a.1.reads)
+                .then_with(|| b.1.writes.cmp(&a.1.writes))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        for (key, stat) in entries {
+            let mut notes = Vec::new();
+            if stat.reads > 5 {
+                notes.push("HOT READ (Suggest Caching)");
+            } else if stat.reads > 0 && stat.writes == 0 {
+                notes.push("READ-ONLY");
+            }
+            if stat.writes > stat.reads {
+                notes.push("WRITE-HEAVY");
+            }
+
+            let display_notes = if notes.is_empty() {
+                "".to_string()
+            } else {
+                notes.join(", ")
+            };
+
+            let key_display = if key.len() > 30 {
+                format!("{}...", &key[0..27])
+            } else {
+                key.clone()
+            };
+
+            println!(
+                "{:<30} | {:<10} | {:<10} | {}",
+                key_display.with(Color::Cyan),
+                stat.reads.to_string().with(if stat.reads > 5 { Color::Red } else { Color::White }),
+                stat.writes.to_string().with(if stat.writes > stat.reads { Color::Yellow } else { Color::White }),
+                display_notes.with(Color::DarkGrey)
+            );
+        }
+        println!();
     }
 
     /// Capture a snapshot of all storage entries from the host
@@ -269,6 +379,22 @@ impl StorageDiff {
     pub fn is_empty(&self) -> bool {
         self.added.is_empty() && self.modified.is_empty() && self.deleted.is_empty()
     }
+}
+
+/// Statistics for a single storage access key
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccessStats {
+    pub reads: usize,
+    pub writes: usize,
+}
+
+/// Report containing an analysis of storage access patterns
+#[derive(Debug, Clone)]
+pub struct AccessPatternReport {
+    pub stats: HashMap<String, AccessStats>,
+    pub hot_read_keys: Vec<String>,
+    pub write_heavy_keys: Vec<String>,
+    pub read_never_written: Vec<String>,
 }
 
 impl Default for StorageInspector {
@@ -478,5 +604,75 @@ mod tests {
         assert!(diff.added.contains_key("added"));
         assert!(diff.modified.contains_key("modified"));
         assert!(diff.deleted.contains(&"deleted".to_string()));
+    }
+
+    // ── Storage Access Pattern Analyzer tests ────────────────────────
+
+    #[test]
+    fn test_track_read_and_write() {
+        let mut inspector = StorageInspector::new();
+        inspector.track_read("key1");
+        inspector.track_read("key1");
+        inspector.track_write("key1");
+        inspector.track_write("key2");
+
+        let report = inspector.analyze_access_patterns();
+        assert_eq!(report.stats.get("key1").unwrap().reads, 2);
+        assert_eq!(report.stats.get("key1").unwrap().writes, 1);
+        assert_eq!(report.stats.get("key2").unwrap().reads, 0);
+        assert_eq!(report.stats.get("key2").unwrap().writes, 1);
+
+        // testing via set method
+        inspector.set("key3", "val3");
+        let report = inspector.analyze_access_patterns();
+        assert_eq!(report.stats.get("key3").unwrap().writes, 1);
+    }
+
+    #[test]
+    fn test_analyze_hot_keys_and_suggestions() {
+        let mut inspector = StorageInspector::new();
+
+        // Hot read key
+        for _ in 0..6 {
+            inspector.track_read("hot_key");
+        }
+
+        // Write heavy key
+        inspector.track_write("write_heavy");
+        inspector.track_write("write_heavy");
+        inspector.track_read("write_heavy");
+
+        // Read but never written
+        inspector.track_read("read_only");
+        inspector.track_read("read_only");
+
+        let report = inspector.analyze_access_patterns();
+
+        assert!(report.hot_read_keys.contains(&"hot_key".to_string()));
+        assert!(!report.hot_read_keys.contains(&"read_only".to_string()));
+        
+        assert!(report.write_heavy_keys.contains(&"write_heavy".to_string()));
+        assert!(!report.write_heavy_keys.contains(&"hot_key".to_string()));
+
+        assert!(report.read_never_written.contains(&"read_only".to_string()));
+        // hot_key had 0 writes so it should actually be in read_never_written too
+        assert!(report.read_never_written.contains(&"hot_key".to_string()));
+    }
+
+    #[test]
+    fn test_display_access_report() {
+        // Just verify it runs without panicking with sorted items
+        let mut inspector = StorageInspector::new();
+        
+        for _ in 0..10 {
+            inspector.track_read("config:global");
+        }
+        for _ in 0..3 {
+            inspector.track_write("user:alice:balance");
+        }
+        inspector.track_read("user:alice:balance");
+        inspector.track_read("user:bob:balance");
+
+        inspector.display_access_report();
     }
 }
