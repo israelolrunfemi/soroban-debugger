@@ -1,8 +1,8 @@
 use crate::server::protocol::{DebugMessage, DebugRequest, DebugResponse};
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
-use tracing::{error, info};
+use tracing::info;
 
 /// Remote client for connecting to a debug server
 pub struct RemoteClient {
@@ -15,9 +15,10 @@ impl RemoteClient {
     /// Connect to a remote debug server
     pub fn connect(addr: &str, token: Option<String>) -> Result<Self> {
         info!("Connecting to debug server at {}", addr);
-        let stream = TcpStream::connect(addr)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to connect to {}: {}", addr, e)))?;
-        
+        let stream = TcpStream::connect(addr).map_err(|e| {
+            DebuggerError::FileError(format!("Failed to connect to {}: {}", addr, e))
+        })?;
+
         let mut client = Self {
             stream,
             message_id: 0,
@@ -45,10 +46,17 @@ impl RemoteClient {
                     info!("Authentication successful");
                     Ok(())
                 } else {
-                    Err(DebuggerError::ExecutionError(format!("Authentication failed: {}", message)).into())
+                    Err(DebuggerError::ExecutionError(format!(
+                        "Authentication failed: {}",
+                        message
+                    ))
+                    .into())
                 }
             }
-            _ => Err(DebuggerError::ExecutionError("Unexpected response to authentication".to_string()).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to authentication".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -63,8 +71,11 @@ impl RemoteClient {
                 info!("Contract loaded: {} bytes", size);
                 Ok(size)
             }
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to LoadContract")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to LoadContract".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -84,11 +95,16 @@ impl RemoteClient {
                 if success {
                     Ok(output)
                 } else {
-                    Err(DebuggerError::ExecutionError(format!("{}", error.unwrap_or_else(|| "Unknown error".to_string()))).into())
+                    Err(DebuggerError::ExecutionError(
+                        error.unwrap_or_else(|| "Unknown error".to_string()),
+                    )
+                    .into())
                 }
             }
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to Execute")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to Execute".to_string()).into(),
+            ),
         }
     }
 
@@ -102,8 +118,10 @@ impl RemoteClient {
                 current_function,
                 step_count,
             } => Ok((paused, current_function, step_count)),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to Step")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => {
+                Err(DebuggerError::ExecutionError("Unexpected response to Step".to_string()).into())
+            }
         }
     }
 
@@ -113,8 +131,10 @@ impl RemoteClient {
 
         match response {
             DebugResponse::ContinueResult { completed, .. } => Ok(completed),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to Continue")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to Continue".to_string()).into(),
+            ),
         }
     }
 
@@ -129,8 +149,10 @@ impl RemoteClient {
                 paused,
                 call_stack,
             } => Ok((function, step_count, paused, call_stack)),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to Inspect")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to Inspect".to_string()).into(),
+            ),
         }
     }
 
@@ -140,8 +162,11 @@ impl RemoteClient {
 
         match response {
             DebugResponse::StorageState { storage_json } => Ok(storage_json),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to GetStorage")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to GetStorage".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -151,8 +176,10 @@ impl RemoteClient {
 
         match response {
             DebugResponse::CallStack { stack } => Ok(stack),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to GetStack")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to GetStack".to_string()).into(),
+            ),
         }
     }
 
@@ -165,8 +192,11 @@ impl RemoteClient {
                 cpu_instructions,
                 memory_bytes,
             } => Ok((cpu_instructions, memory_bytes)),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to GetBudget")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(
+                DebuggerError::ExecutionError("Unexpected response to GetBudget".to_string())
+                    .into(),
+            ),
         }
     }
 
@@ -181,8 +211,11 @@ impl RemoteClient {
                 info!("Breakpoint set at {}", function);
                 Ok(())
             }
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to SetBreakpoint")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to SetBreakpoint".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -197,8 +230,11 @@ impl RemoteClient {
                 info!("Breakpoint cleared at {}", function);
                 Ok(())
             }
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to ClearBreakpoint")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to ClearBreakpoint".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -208,8 +244,11 @@ impl RemoteClient {
 
         match response {
             DebugResponse::BreakpointsList { breakpoints } => Ok(breakpoints),
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to ListBreakpoints")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to ListBreakpoints".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -224,8 +263,11 @@ impl RemoteClient {
                 info!("Storage set successfully");
                 Ok(())
             }
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to SetStorage")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to SetStorage".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -240,8 +282,11 @@ impl RemoteClient {
                 info!("Snapshot loaded: {}", summary);
                 Ok(summary)
             }
-            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(format!("{}", message)).into()),
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to LoadSnapshot")).into()),
+            DebugResponse::Error { message } => Err(DebuggerError::ExecutionError(message).into()),
+            _ => Err(DebuggerError::ExecutionError(
+                "Unexpected response to LoadSnapshot".to_string(),
+            )
+            .into()),
         }
     }
 
@@ -254,7 +299,9 @@ impl RemoteClient {
                 info!("Server responded to ping");
                 Ok(())
             }
-            _ => Err(DebuggerError::ExecutionError(format!("Unexpected response to Ping")).into()),
+            _ => {
+                Err(DebuggerError::ExecutionError("Unexpected response to Ping".to_string()).into())
+            }
         }
     }
 
@@ -267,8 +314,16 @@ impl RemoteClient {
 
     /// Send a request and wait for response
     fn send_request(&mut self, request: DebugRequest) -> Result<DebugResponse> {
-        if !self.authenticated && !matches!(request, DebugRequest::Authenticate { .. } | DebugRequest::Ping) {
-            return Err(DebuggerError::ExecutionError("Not authenticated. Call authenticate() first.".to_string()).into());
+        if !self.authenticated
+            && !matches!(
+                request,
+                DebugRequest::Authenticate { .. } | DebugRequest::Ping
+            )
+        {
+            return Err(DebuggerError::ExecutionError(
+                "Not authenticated. Call authenticate() first.".to_string(),
+            )
+            .into());
         }
 
         self.message_id += 1;
@@ -280,21 +335,24 @@ impl RemoteClient {
         // Send request
         writeln!(self.stream, "{}", request_json)
             .map_err(|e| DebuggerError::FileError(format!("Failed to write to stream: {}", e)))?;
-        self.stream.flush()
+        self.stream
+            .flush()
             .map_err(|e| DebuggerError::FileError(format!("Failed to flush stream: {}", e)))?;
 
         // Read response
         let reader = BufReader::new(&self.stream);
         let mut lines = reader.lines();
-        let response_line = lines.next()
+        let response_line = lines
+            .next()
             .ok_or_else(|| DebuggerError::FileError("No response from server".to_string()))?
             .map_err(|e| DebuggerError::FileError(format!("Failed to read response: {}", e)))?;
 
         let response_message: DebugMessage = serde_json::from_str(&response_line)
             .map_err(|e| DebuggerError::FileError(format!("Failed to parse response: {}", e)))?;
 
-        response_message.response
-            .ok_or_else(|| DebuggerError::FileError("Response message has no response field".to_string()).into())
+        response_message.response.ok_or_else(|| {
+            DebuggerError::FileError("Response message has no response field".to_string()).into()
+        })
     }
 }
 

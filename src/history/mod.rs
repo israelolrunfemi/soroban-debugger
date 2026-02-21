@@ -1,4 +1,4 @@
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
@@ -22,11 +22,17 @@ impl HistoryManager {
     pub fn new() -> Result<Self> {
         let home_dir = std::env::var("HOME")
             .or_else(|_| std::env::var("USERPROFILE"))
-            .map_err(|_| DebuggerError::FileError("Could not determine home directory".to_string()))?;
+            .map_err(|_| {
+                DebuggerError::FileError("Could not determine home directory".to_string())
+            })?;
         let debug_dir = PathBuf::from(home_dir).join(".soroban-debug");
         if !debug_dir.exists() {
-            fs::create_dir_all(&debug_dir)
-                .map_err(|e| DebuggerError::FileError(format!("Failed to create debug directory {:?}: {}", debug_dir, e)))?;
+            fs::create_dir_all(&debug_dir).map_err(|e| {
+                DebuggerError::FileError(format!(
+                    "Failed to create debug directory {:?}: {}",
+                    debug_dir, e
+                ))
+            })?;
         }
         Ok(Self {
             file_path: debug_dir.join("history.json"),
@@ -43,8 +49,12 @@ impl HistoryManager {
         if !self.file_path.exists() {
             return Ok(Vec::new());
         }
-        let file = File::open(&self.file_path)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to open history file {:?}: {}", self.file_path, e)))?;
+        let file = File::open(&self.file_path).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to open history file {:?}: {}",
+                self.file_path, e
+            ))
+        })?;
         let reader = BufReader::new(file);
         let history: Vec<RunHistory> =
             serde_json::from_reader(reader).unwrap_or_else(|_| Vec::new());
@@ -55,11 +65,19 @@ impl HistoryManager {
     pub fn append_record(&self, record: RunHistory) -> Result<()> {
         let mut history = self.load_history()?;
         history.push(record);
-        let file = File::create(&self.file_path)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to create history file {:?}: {}", self.file_path, e)))?;
+        let file = File::create(&self.file_path).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to create history file {:?}: {}",
+                self.file_path, e
+            ))
+        })?;
         let writer = BufWriter::new(file);
-        serde_json::to_writer_pretty(writer, &history)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to write history file {:?}: {}", self.file_path, e)))?;
+        serde_json::to_writer_pretty(writer, &history).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to write history file {:?}: {}",
+                self.file_path, e
+            ))
+        })?;
         Ok(())
     }
 

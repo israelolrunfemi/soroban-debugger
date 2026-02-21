@@ -5,7 +5,7 @@ use crate::debugger::stepper::Stepper;
 use crate::runtime::executor::ContractExecutor;
 use crate::runtime::instruction::Instruction;
 use crate::runtime::instrumentation::Instrumenter;
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -46,7 +46,9 @@ impl DebuggerEngine {
         let instructions = self
             .instrumenter
             .parse_instructions(wasm_bytes)
-            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to parse instructions: {}", e)))?
+            .map_err(|e| {
+                DebuggerError::WasmLoadError(format!("Failed to parse instructions: {}", e))
+            })?
             .to_vec();
 
         if let Ok(mut state) = self.state.lock() {
@@ -148,7 +150,10 @@ impl DebuggerEngine {
     /// Step into next instruction.
     pub fn step_into(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
-            return Err(DebuggerError::ExecutionError("Instruction debugging not enabled".to_string()).into());
+            return Err(DebuggerError::ExecutionError(
+                "Instruction debugging not enabled".to_string(),
+            )
+            .into());
         }
 
         let stepped = if let Ok(mut state) = self.state.lock() {
@@ -163,7 +168,10 @@ impl DebuggerEngine {
     /// Step over function calls.
     pub fn step_over(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
-            return Err(DebuggerError::ExecutionError("Instruction debugging not enabled".to_string()).into());
+            return Err(DebuggerError::ExecutionError(
+                "Instruction debugging not enabled".to_string(),
+            )
+            .into());
         }
 
         let stepped = if let Ok(mut state) = self.state.lock() {
@@ -178,7 +186,10 @@ impl DebuggerEngine {
     /// Step out of current function.
     pub fn step_out(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
-            return Err(DebuggerError::ExecutionError("Instruction debugging not enabled".to_string()).into());
+            return Err(DebuggerError::ExecutionError(
+                "Instruction debugging not enabled".to_string(),
+            )
+            .into());
         }
 
         let stepped = if let Ok(mut state) = self.state.lock() {
@@ -193,7 +204,10 @@ impl DebuggerEngine {
     /// Step to next basic block.
     pub fn step_block(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
-            return Err(DebuggerError::ExecutionError("Instruction debugging not enabled".to_string()).into());
+            return Err(DebuggerError::ExecutionError(
+                "Instruction debugging not enabled".to_string(),
+            )
+            .into());
         }
 
         let stepped = if let Ok(mut state) = self.state.lock() {
@@ -208,7 +222,10 @@ impl DebuggerEngine {
     /// Step backwards to previous instruction.
     pub fn step_back(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
-            return Err(DebuggerError::ExecutionError("Instruction debugging not enabled".to_string()).into());
+            return Err(DebuggerError::ExecutionError(
+                "Instruction debugging not enabled".to_string(),
+            )
+            .into());
         }
 
         let stepped = if let Ok(mut state) = self.state.lock() {
@@ -223,7 +240,10 @@ impl DebuggerEngine {
     /// Start instruction stepping with given mode.
     pub fn start_instruction_stepping(&mut self, mode: StepMode) -> Result<()> {
         if !self.instruction_debug_enabled {
-            return Err(DebuggerError::ExecutionError("Instruction debugging not enabled".to_string()).into());
+            return Err(DebuggerError::ExecutionError(
+                "Instruction debugging not enabled".to_string(),
+            )
+            .into());
         }
 
         if let Ok(mut state) = self.state.lock() {

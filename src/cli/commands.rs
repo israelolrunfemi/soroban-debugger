@@ -12,7 +12,7 @@ use crate::runtime::executor::ContractExecutor;
 use crate::simulator::SnapshotLoader;
 use crate::ui::formatter::Formatter;
 use crate::ui::tui::DebuggerUI;
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use std::fs;
 use textplots::{Chart, Plot, Shape};
 
@@ -82,8 +82,12 @@ fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
             "results": results,
             "summary": summary,
         });
-        println!("\n{}", serde_json::to_string_pretty(&output)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to serialize output: {}", e)))?);
+        println!(
+            "\n{}",
+            serde_json::to_string_pretty(&output).map_err(|e| DebuggerError::FileError(
+                format!("Failed to serialize output: {}", e)
+            ))?
+        );
     }
 
     logging::log_execution_complete(&format!("{}/{} passed", summary.passed, summary.total));
@@ -128,9 +132,9 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         if checksum != *expected {
             return Err(DebuggerError::WasmLoadError(format!(
                 "WASM checksum mismatch! Expected {}, but got {}",
-                expected,
-                checksum
-            )).into());
+                expected, checksum
+            ))
+            .into());
         }
     }
 
@@ -165,8 +169,9 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         print_info(format!("Importing storage from: {:?}", import_path));
         let imported = crate::inspector::storage::StorageState::import_from_file(import_path)?;
         print_success(format!("Imported {} storage entries", imported.len()));
-        initial_storage = Some(serde_json::to_string(&imported)
-            .map_err(|e| DebuggerError::StorageError(format!("Failed to serialize imported storage: {}", e)))?);
+        initial_storage = Some(serde_json::to_string(&imported).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to serialize imported storage: {}", e))
+        })?);
     }
 
     if let Some(n) = args.repeat {
@@ -409,8 +414,12 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             output["ledger_entries"] = ledger.to_json();
         }
 
-        println!("{}", serde_json::to_string_pretty(&output)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to serialize output: {}", e)))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&output).map_err(|e| DebuggerError::FileError(
+                format!("Failed to serialize output: {}", e)
+            ))?
+        );
     }
 
     Ok(())
@@ -984,12 +993,13 @@ pub fn symbolic(args: SymbolicArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!(
         "Starting symbolic execution analysis for contract: {:?}",
         args.contract
-    ));|    print_info(format!(
-        "Starting symbolic execution analysis for contract: {:?}",
-        args.contract
     ));
-    let wasm_bytes = fs::read(&args.contract)
-        .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to read WASM file {:?}: {}", args.contract, e)))?;
+    let wasm_bytes = fs::read(&args.contract).map_err(|e| {
+        DebuggerError::WasmLoadError(format!(
+            "Failed to read WASM file {:?}: {}",
+            args.contract, e
+        ))
+    })?;
 
     let analyzer = crate::analyzer::symbolic::SymbolicAnalyzer::new();
     let report = analyzer.analyze(&wasm_bytes, &args.function)?;
@@ -999,8 +1009,9 @@ pub fn symbolic(args: SymbolicArgs, _verbosity: Verbosity) -> Result<()> {
 
     let toml = analyzer.generate_scenario_toml(&report);
     if let Some(out) = args.output {
-        fs::write(&out, toml)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to write toml to {:?}: {}", out, e)))?;
+        fs::write(&out, toml).map_err(|e| {
+            DebuggerError::FileError(format!("Failed to write toml to {:?}: {}", out, e))
+        })?;
         print_success(format!("Wrote scenario to {:?}", out));
     } else {
         println!("{}", toml);
@@ -1026,7 +1037,8 @@ fn run_instruction_stepping(
             .map_err(|e| DebuggerError::FileError(format!("Failed to flush stdout: {}", e)))?;
 
         let mut input = String::new();
-        std::io::stdin().read_line(&mut input)
+        std::io::stdin()
+            .read_line(&mut input)
             .map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
         let input = input.trim().to_lowercase();
 
@@ -1083,10 +1095,12 @@ fn run_instruction_stepping(
             "i" | "info" => display_instruction_info(engine),
             "ctx" | "context" => {
                 print!("Enter context size (default 5): ");
-                std::io::Write::flush(&mut std::io::stdout())
-                    .map_err(|e| DebuggerError::FileError(format!("Failed to flush stdout: {}", e)))?;
+                std::io::Write::flush(&mut std::io::stdout()).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to flush stdout: {}", e))
+                })?;
                 let mut size_input = String::new();
-                std::io::stdin().read_line(&mut size_input)
+                std::io::stdin()
+                    .read_line(&mut size_input)
                     .map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
                 let size = size_input.trim().parse().unwrap_or(5);
                 display_instruction_context(engine, size);
@@ -1246,38 +1260,41 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> crat
 /// Start the debug server
 pub fn server(args: ServerArgs) -> Result<()> {
     use crate::server::DebugServer;
-    
+
     print_info(format!("Starting debug server on port {}", args.port));
-    
+
     let mut server = DebugServer::new(args.port, args.token);
-    
+
     if let (Some(cert), Some(key)) = (args.tls_cert, args.tls_key) {
         server = server.with_tls(cert, key);
         print_info("TLS enabled");
     }
-    
+
     print_success("Debug server started. Waiting for connections...");
     print_info("Press Ctrl+C to stop the server");
-    
+
     server.start()?;
-    
+
     Ok(())
 }
 
 /// Connect to remote debug server and run interactive session
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     use crate::client::RemoteClient;
-    
-    print_info(format!("Connecting to remote debug server at {}", args.remote));
-    
+
+    print_info(format!(
+        "Connecting to remote debug server at {}",
+        args.remote
+    ));
+
     let mut client = RemoteClient::connect(&args.remote, args.token.clone())?;
     print_success("Connected to debug server");
-    
+
     // If contract and function are provided, execute directly
     if let (Some(contract), Some(function)) = (&args.contract, &args.function) {
         print_info(format!("Loading contract: {:?}", contract));
         let _size = client.load_contract(&contract.to_string_lossy())?;
-        
+
         print_info(format!("Executing function: {}", function));
         match client.execute(function, args.args.as_deref()) {
             Ok(output) => {
@@ -1286,28 +1303,29 @@ pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
             }
             Err(e) => {
                 print_warning(format!("Execution failed: {}", e));
-                return Err(e.into());
+                return Err(e);
             }
         }
     } else {
         // Interactive mode
         print_info("Starting interactive remote debugging session");
         print_info("Type 'help' for available commands");
-        
+
         loop {
             print!("\n(remote-debug) ");
             std::io::Write::flush(&mut std::io::stdout())
                 .map_err(|e| DebuggerError::FileError(format!("Failed to flush stdout: {}", e)))?;
-            
+
             let mut input = String::new();
-            std::io::stdin().read_line(&mut input)
+            std::io::stdin()
+                .read_line(&mut input)
                 .map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
             let command = input.trim();
-            
+
             if command.is_empty() {
                 continue;
             }
-            
+
             let parts: Vec<&str> = command.split_whitespace().collect();
             match parts[0] {
                 "load" | "l" => {
@@ -1335,52 +1353,40 @@ pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
                         }
                     }
                 }
-                "step" | "s" => {
-                    match client.step() {
-                        Ok((paused, func, count)) => {
-                            println!("Step {}: function={:?}, paused={}", count, func, paused);
-                        }
-                        Err(e) => print_warning(format!("Step failed: {}", e)),
+                "step" | "s" => match client.step() {
+                    Ok((paused, func, count)) => {
+                        println!("Step {}: function={:?}, paused={}", count, func, paused);
                     }
-                }
-                "continue" | "c" => {
-                    match client.continue_execution() {
-                        Ok(completed) => println!("Execution completed: {}", completed),
-                        Err(e) => print_warning(format!("Continue failed: {}", e)),
+                    Err(e) => print_warning(format!("Step failed: {}", e)),
+                },
+                "continue" | "c" => match client.continue_execution() {
+                    Ok(completed) => println!("Execution completed: {}", completed),
+                    Err(e) => print_warning(format!("Continue failed: {}", e)),
+                },
+                "inspect" | "i" => match client.inspect() {
+                    Ok((func, count, paused, stack)) => {
+                        println!("Function: {:?}", func);
+                        println!("Step count: {}", count);
+                        println!("Paused: {}", paused);
+                        println!("Call stack: {:?}", stack);
                     }
-                }
-                "inspect" | "i" => {
-                    match client.inspect() {
-                        Ok((func, count, paused, stack)) => {
-                            println!("Function: {:?}", func);
-                            println!("Step count: {}", count);
-                            println!("Paused: {}", paused);
-                            println!("Call stack: {:?}", stack);
-                        }
-                        Err(e) => print_warning(format!("Inspect failed: {}", e)),
+                    Err(e) => print_warning(format!("Inspect failed: {}", e)),
+                },
+                "storage" => match client.get_storage() {
+                    Ok(storage) => println!("Storage: {}", storage),
+                    Err(e) => print_warning(format!("Get storage failed: {}", e)),
+                },
+                "stack" => match client.get_stack() {
+                    Ok(stack) => println!("Call stack: {:?}", stack),
+                    Err(e) => print_warning(format!("Get stack failed: {}", e)),
+                },
+                "budget" | "b" => match client.get_budget() {
+                    Ok((cpu, mem)) => {
+                        println!("CPU instructions: {}", cpu);
+                        println!("Memory bytes: {}", mem);
                     }
-                }
-                "storage" => {
-                    match client.get_storage() {
-                        Ok(storage) => println!("Storage: {}", storage),
-                        Err(e) => print_warning(format!("Get storage failed: {}", e)),
-                    }
-                }
-                "stack" => {
-                    match client.get_stack() {
-                        Ok(stack) => println!("Call stack: {:?}", stack),
-                        Err(e) => print_warning(format!("Get stack failed: {}", e)),
-                    }
-                }
-                "budget" | "b" => {
-                    match client.get_budget() {
-                        Ok((cpu, mem)) => {
-                            println!("CPU instructions: {}", cpu);
-                            println!("Memory bytes: {}", mem);
-                        }
-                        Err(e) => print_warning(format!("Get budget failed: {}", e)),
-                    }
-                }
+                    Err(e) => print_warning(format!("Get budget failed: {}", e)),
+                },
                 "break" => {
                     if parts.len() < 2 {
                         print_warning("Usage: break <function>");
@@ -1401,26 +1407,22 @@ pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
                         }
                     }
                 }
-                "list-breaks" => {
-                    match client.list_breakpoints() {
-                        Ok(breaks) => {
-                            if breaks.is_empty() {
-                                println!("No breakpoints set");
-                            } else {
-                                for bp in breaks {
-                                    println!("- {}", bp);
-                                }
+                "list-breaks" => match client.list_breakpoints() {
+                    Ok(breaks) => {
+                        if breaks.is_empty() {
+                            println!("No breakpoints set");
+                        } else {
+                            for bp in breaks {
+                                println!("- {}", bp);
                             }
                         }
-                        Err(e) => print_warning(format!("List breakpoints failed: {}", e)),
                     }
-                }
-                "ping" => {
-                    match client.ping() {
-                        Ok(_) => print_success("Server is responsive"),
-                        Err(e) => print_warning(format!("Ping failed: {}", e)),
-                    }
-                }
+                    Err(e) => print_warning(format!("List breakpoints failed: {}", e)),
+                },
+                "ping" => match client.ping() {
+                    Ok(_) => print_success("Server is responsive"),
+                    Err(e) => print_warning(format!("Ping failed: {}", e)),
+                },
                 "help" | "h" => {
                     println!("Remote debugger commands:");
                     println!("  load <path>          Load a contract");
@@ -1443,11 +1445,14 @@ pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
                     break;
                 }
                 _ => {
-                    print_warning(format!("Unknown command: {}. Type 'help' for available commands.", parts[0]));
+                    print_warning(format!(
+                        "Unknown command: {}. Type 'help' for available commands.",
+                        parts[0]
+                    ));
                 }
             }
         }
     }
-    
+
     Ok(())
 }

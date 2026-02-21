@@ -1,6 +1,6 @@
 use crate::profiler::session::ProfileSession;
 use crate::runtime::executor::ContractExecutor;
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Write;

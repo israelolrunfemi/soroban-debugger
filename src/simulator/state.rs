@@ -4,11 +4,10 @@
 //! Snapshots represent the complete state of the Soroban ledger at a specific point,
 //! including ledger metadata, accounts, and deployed contracts.
 
-use crate::DebuggerError;
+use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
-use miette::Diagnostic;
 
 /// Error type for simulator operations
 #[derive(Debug, Error, Diagnostic)]
@@ -33,7 +32,6 @@ pub enum SimulatorError {
 
     #[error("Account not found: {0}")]
     AccountNotFound(String),
-
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -247,12 +245,15 @@ impl AccountState {
         }
 
         // Validate balance is a valid number
-        self.balance.parse::<u128>().map_err(|_| -> miette::Report {
-            SimulatorError::InvalidBalance(format!(
-                "Balance must be a valid unsigned integer: {}",
-                self.balance
-            )).into()
-        })?;
+        self.balance
+            .parse::<u128>()
+            .map_err(|_| -> miette::Report {
+                SimulatorError::InvalidBalance(format!(
+                    "Balance must be a valid unsigned integer: {}",
+                    self.balance
+                ))
+                .into()
+            })?;
 
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::debugger::engine::DebuggerEngine;
 use crate::inspector::budget::BudgetInfo;
 use crate::inspector::stack::CallFrame;
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
@@ -364,8 +364,9 @@ pub fn run_dashboard(engine: DebuggerEngine, function_name: &str) -> Result<()> 
     enable_raw_mode()
         .map_err(|e| DebuggerError::FileError(format!("Failed to enable raw mode: {}", e)))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-        .map_err(|e| DebuggerError::FileError(format!("Failed to execute terminal command: {}", e)))?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(|e| {
+        DebuggerError::FileError(format!("Failed to execute terminal command: {}", e))
+    })?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)
         .map_err(|e| DebuggerError::FileError(format!("Failed to create terminal: {}", e)))?;
@@ -381,7 +382,8 @@ pub fn run_dashboard(engine: DebuggerEngine, function_name: &str) -> Result<()> 
         DisableMouseCapture
     )
     .map_err(|e| DebuggerError::FileError(format!("Failed to execute terminal command: {}", e)))?;
-    terminal.show_cursor()
+    terminal
+        .show_cursor()
         .map_err(|e| DebuggerError::FileError(format!("Failed to show cursor: {}", e)))?;
 
     if let Err(err) = res {
@@ -401,7 +403,8 @@ fn run_app<B: ratatui::backend::Backend>(
     let mut last_tick = Instant::now();
 
     loop {
-        terminal.draw(|f| ui(f, &mut app))
+        terminal
+            .draw(|f| ui(f, &mut app))
             .map_err(|e| DebuggerError::FileError(format!("Failed to draw terminal: {}", e)))?;
 
         let timeout = tick_rate
@@ -409,9 +412,11 @@ fn run_app<B: ratatui::backend::Backend>(
             .unwrap_or_default();
 
         if event::poll(timeout)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to poll event: {}", e)))? {
+            .map_err(|e| DebuggerError::FileError(format!("Failed to poll event: {}", e)))?
+        {
             if let Event::Key(key) = event::read()
-                .map_err(|e| DebuggerError::FileError(format!("Failed to read event: {}", e)))? {
+                .map_err(|e| DebuggerError::FileError(format!("Failed to read event: {}", e)))?
+            {
                 // Ctrl-C always exits
                 if key.modifiers == KeyModifiers::CONTROL && key.code == KeyCode::Char('c') {
                     return Ok(());

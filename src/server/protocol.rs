@@ -6,52 +6,52 @@ use serde::{Deserialize, Serialize};
 pub enum DebugRequest {
     /// Authenticate with the server
     Authenticate { token: String },
-    
+
     /// Load a contract
     LoadContract { contract_path: String },
-    
+
     /// Execute a function
     Execute {
         function: String,
         args: Option<String>,
     },
-    
+
     /// Step execution
     Step,
-    
+
     /// Continue execution
     Continue,
-    
+
     /// Inspect current state
     Inspect,
-    
+
     /// Get storage state
     GetStorage,
-    
+
     /// Get call stack
     GetStack,
-    
+
     /// Get budget information
     GetBudget,
-    
+
     /// Set a breakpoint
     SetBreakpoint { function: String },
-    
+
     /// Clear a breakpoint
     ClearBreakpoint { function: String },
-    
+
     /// List all breakpoints
     ListBreakpoints,
-    
+
     /// Set initial storage
     SetStorage { storage_json: String },
-    
+
     /// Load network snapshot
     LoadSnapshot { snapshot_path: String },
-    
+
     /// Ping to check connection
     Ping,
-    
+
     /// Disconnect
     Disconnect,
 }
@@ -62,31 +62,31 @@ pub enum DebugRequest {
 pub enum DebugResponse {
     /// Authentication result
     Authenticated { success: bool, message: String },
-    
+
     /// Contract loaded
     ContractLoaded { size: usize },
-    
+
     /// Execution result
     ExecutionResult {
         success: bool,
         output: String,
         error: Option<String>,
     },
-    
+
     /// Step result
     StepResult {
         paused: bool,
         current_function: Option<String>,
         step_count: u64,
     },
-    
+
     /// Continue result
     ContinueResult {
         completed: bool,
         output: Option<String>,
         error: Option<String>,
     },
-    
+
     /// Inspection result
     InspectionResult {
         function: Option<String>,
@@ -94,37 +94,37 @@ pub enum DebugResponse {
         paused: bool,
         call_stack: Vec<String>,
     },
-    
+
     /// Storage state
     StorageState { storage_json: String },
-    
+
     /// Call stack
     CallStack { stack: Vec<String> },
-    
+
     /// Budget information
     BudgetInfo {
         cpu_instructions: u64,
         memory_bytes: u64,
     },
-    
+
     /// Breakpoint set
     BreakpointSet { function: String },
-    
+
     /// Breakpoint cleared
     BreakpointCleared { function: String },
-    
+
     /// List of breakpoints
     BreakpointsList { breakpoints: Vec<String> },
-    
+
     /// Snapshot loaded
     SnapshotLoaded { summary: String },
-    
+
     /// Error response
     Error { message: String },
-    
+
     /// Pong response
     Pong,
-    
+
     /// Disconnected
     Disconnected,
 }
@@ -145,7 +145,7 @@ impl DebugMessage {
             response: None,
         }
     }
-    
+
     pub fn response(id: u64, response: DebugResponse) -> Self {
         Self {
             id,

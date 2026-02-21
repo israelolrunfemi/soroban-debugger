@@ -142,12 +142,8 @@ fn main() -> miette::Result<()> {
         Some(Commands::Symbolic(args)) => {
             soroban_debugger::cli::commands::symbolic(args, verbosity)
         }
-        Some(Commands::Server(args)) => {
-            soroban_debugger::cli::commands::server(args)
-        }
-        Some(Commands::Remote(args)) => {
-            soroban_debugger::cli::commands::remote(args, verbosity)
-        }
+        Some(Commands::Server(args)) => soroban_debugger::cli::commands::server(args),
+        Some(Commands::Remote(args)) => soroban_debugger::cli::commands::remote(args, verbosity),
         None => {
             if let Some(path) = cli.list_functions {
                 return soroban_debugger::cli::commands::inspect(

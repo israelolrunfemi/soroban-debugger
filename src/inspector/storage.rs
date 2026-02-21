@@ -1,4 +1,4 @@
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use crossterm::style::{Color, Stylize};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -33,19 +33,31 @@ impl StorageState {
         let state = StorageState {
             entries: entries.clone(),
         };
-        let json = serde_json::to_string_pretty(&state)
-            .map_err(|e| DebuggerError::StorageError(format!("Failed to serialize storage state: {}", e)))?;
-        fs::write(path.as_ref(), json)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to write storage file {:?}: {}", path.as_ref(), e)))?;
+        let json = serde_json::to_string_pretty(&state).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to serialize storage state: {}", e))
+        })?;
+        fs::write(path.as_ref(), json).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to write storage file {:?}: {}",
+                path.as_ref(),
+                e
+            ))
+        })?;
         Ok(())
     }
 
     /// Import storage state from JSON file
     pub fn import_from_file<P: AsRef<Path>>(path: P) -> Result<HashMap<String, String>> {
-        let contents = fs::read_to_string(path.as_ref())
-            .map_err(|e| DebuggerError::FileError(format!("Failed to read storage file {:?}: {}", path.as_ref(), e)))?;
-        let state: StorageState = serde_json::from_str(&contents)
-            .map_err(|e| DebuggerError::StorageError(format!("Failed to parse storage JSON: {}", e)))?;
+        let contents = fs::read_to_string(path.as_ref()).map_err(|e| {
+            DebuggerError::FileError(format!(
+                "Failed to read storage file {:?}: {}",
+                path.as_ref(),
+                e
+            ))
+        })?;
+        let state: StorageState = serde_json::from_str(&contents).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to parse storage JSON: {}", e))
+        })?;
         Ok(state.entries)
     }
 }

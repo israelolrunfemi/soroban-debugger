@@ -4,7 +4,7 @@
 //! allowing users to capture the state of a ledger after debugging and
 //! restore it later for continued work.
 
-use super::state::{NetworkSnapshot, SimulatorError};
+use super::state::NetworkSnapshot;
 use crate::Result;
 use std::fs;
 use std::path::Path;
@@ -23,12 +23,17 @@ impl SnapshotManager {
         snapshot.validate()?;
 
         // Serialize to pretty JSON
-        let json = serde_json::to_string_pretty(snapshot)
-            .map_err(|e| crate::DebuggerError::FileError(format!("Failed to serialize snapshot: {}", e)))?;
+        let json = serde_json::to_string_pretty(snapshot).map_err(|e| {
+            crate::DebuggerError::FileError(format!("Failed to serialize snapshot: {}", e))
+        })?;
 
         // Write to file
-        fs::write(path, &json)
-            .map_err(|e| crate::DebuggerError::FileError(format!("Failed to write snapshot file {:?}: {}", path, e)))?;
+        fs::write(path, &json).map_err(|e| {
+            crate::DebuggerError::FileError(format!(
+                "Failed to write snapshot file {:?}: {}",
+                path, e
+            ))
+        })?;
 
         info!("Snapshot saved successfully ({} bytes)", json.len());
 
@@ -41,12 +46,17 @@ impl SnapshotManager {
         info!("Loading snapshot from: {:?}", path);
 
         // Read file
-        let contents = fs::read_to_string(path)
-            .map_err(|e| crate::DebuggerError::FileError(format!("Failed to read snapshot file {:?}: {}", path, e)))?;
+        let contents = fs::read_to_string(path).map_err(|e| {
+            crate::DebuggerError::FileError(format!(
+                "Failed to read snapshot file {:?}: {}",
+                path, e
+            ))
+        })?;
 
         // Parse JSON
-        let snapshot: NetworkSnapshot = serde_json::from_str(&contents)
-            .map_err(|e| crate::DebuggerError::FileError(format!("Failed to parse snapshot JSON: {}", e)))?;
+        let snapshot: NetworkSnapshot = serde_json::from_str(&contents).map_err(|e| {
+            crate::DebuggerError::FileError(format!("Failed to parse snapshot JSON: {}", e))
+        })?;
 
         // Validate loaded snapshot
         snapshot.validate()?;

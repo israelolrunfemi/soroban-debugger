@@ -53,10 +53,14 @@ impl BreakpointManager {
     #[allow(dead_code)]
     pub fn parse_condition(_s: &str) -> crate::Result<()> {
         use crate::DebuggerError;
-        Err(DebuggerError::BreakpointError("Conditional breakpoints are not yet implemented".to_string()).into())
+        Err(DebuggerError::BreakpointError(
+            "Conditional breakpoints are not yet implemented".to_string(),
+        )
+        .into())
     }
 }
 
+#[allow(dead_code)]
 fn find_operator(s: &str) -> Option<(&'static str, usize)> {
     let ops = [">=", "<=", "==", "!=", ">", "<"];
     for op in ops {
@@ -66,7 +70,6 @@ fn find_operator(s: &str) -> Option<(&'static str, usize)> {
     }
     None
 }
-
 
 impl Default for BreakpointManager {
     fn default() -> Self {

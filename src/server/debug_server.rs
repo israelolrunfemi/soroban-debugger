@@ -2,12 +2,12 @@ use crate::debugger::engine::DebuggerEngine;
 use crate::runtime::executor::ContractExecutor;
 use crate::server::protocol::{DebugMessage, DebugRequest, DebugResponse};
 use crate::simulator::SnapshotLoader;
-use crate::{Result, DebuggerError};
+use crate::{DebuggerError, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 /// Debug server that handles remote debugging connections
 pub struct DebugServer {
@@ -19,8 +19,10 @@ pub struct DebugServer {
 
 /// Session state for a connected client
 struct Session {
+    #[allow(clippy::arc_with_non_send_sync)]
     engine: Option<Arc<Mutex<DebuggerEngine>>>,
     authenticated: bool,
+    #[allow(dead_code)]
     message_id: u64,
 }
 
@@ -62,7 +64,7 @@ impl DebugServer {
                     let token = self.token.clone();
                     let tls_cert = self.tls_cert.clone();
                     let tls_key = self.tls_key.clone();
-                    
+
                     // Handle each connection in a separate thread
                     std::thread::spawn(move || {
                         if let Err(e) = Self::handle_client(stream, token, tls_cert, tls_key) {
@@ -85,7 +87,8 @@ impl DebugServer {
         _tls_cert: Option<PathBuf>,
         _tls_key: Option<PathBuf>,
     ) -> Result<()> {
-        let peer_addr = stream.peer_addr()
+        let peer_addr = stream
+            .peer_addr()
             .map_err(|e| DebuggerError::FileError(format!("Failed to get peer address: {}", e)))?;
         info!("New client connected from {}", peer_addr);
 
@@ -95,26 +98,34 @@ impl DebugServer {
             message_id: 0,
         };
 
-        let reader = BufReader::new(stream.try_clone()
-            .map_err(|e| DebuggerError::FileError(format!("Failed to clone stream: {}", e)))?);
+        let reader = BufReader::new(
+            stream
+                .try_clone()
+                .map_err(|e| DebuggerError::FileError(format!("Failed to clone stream: {}", e)))?,
+        );
         let mut writer = stream;
 
         for line in reader.lines() {
-            let line = line.map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
+            let line =
+                line.map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
             if line.is_empty() {
                 continue;
             }
 
-            let message: DebugMessage = serde_json::from_str(&line)
-                .map_err(|e| DebuggerError::FileError(format!("Failed to parse message: {}: {}", line, e)))?;
+            let message: DebugMessage = serde_json::from_str(&line).map_err(|e| {
+                DebuggerError::FileError(format!("Failed to parse message: {}: {}", line, e))
+            })?;
 
             let response = Self::handle_request(&mut session, message, &token)?;
 
-            let response_json = serde_json::to_string(&response)
-                .map_err(|e| DebuggerError::FileError(format!("Failed to serialize response: {}", e)))?;
-            writeln!(writer, "{}", response_json)
-                .map_err(|e| DebuggerError::FileError(format!("Failed to write response: {}", e)))?;
-            writer.flush()
+            let response_json = serde_json::to_string(&response).map_err(|e| {
+                DebuggerError::FileError(format!("Failed to serialize response: {}", e))
+            })?;
+            writeln!(writer, "{}", response_json).map_err(|e| {
+                DebuggerError::FileError(format!("Failed to write response: {}", e))
+            })?;
+            writer
+                .flush()
                 .map_err(|e| DebuggerError::FileError(format!("Failed to flush stream: {}", e)))?;
         }
 
@@ -122,14 +133,15 @@ impl DebugServer {
         Ok(())
     }
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn handle_request(
         session: &mut Session,
         message: DebugMessage,
         expected_token: &Option<String>,
     ) -> Result<DebugMessage> {
-        let request = message.request.ok_or_else(|| {
-            DebuggerError::ExecutionError("Message has no request".to_string())
-        })?;
+        let request = message
+            .request
+            .ok_or_else(|| DebuggerError::ExecutionError("Message has no request".to_string()))?;
 
         // Check authentication for all requests except Authenticate and Ping
         match &request {
@@ -139,7 +151,8 @@ impl DebugServer {
                     return Ok(DebugMessage::response(
                         message.id,
                         DebugResponse::Error {
-                            message: "Not authenticated. Send Authenticate request first.".to_string(),
+                            message: "Not authenticated. Send Authenticate request first."
+                                .to_string(),
                         },
                     ));
                 }
@@ -184,16 +197,14 @@ impl DebugServer {
 
             DebugRequest::LoadSnapshot { snapshot_path } => {
                 match SnapshotLoader::from_file(&snapshot_path) {
-                    Ok(loader) => {
-                        match loader.apply_to_environment() {
-                            Ok(snapshot) => DebugResponse::SnapshotLoaded {
-                                summary: snapshot.format_summary(),
-                            },
-                            Err(e) => DebugResponse::Error {
-                                message: format!("Failed to apply snapshot: {}", e),
-                            },
-                        }
-                    }
+                    Ok(loader) => match loader.apply_to_environment() {
+                        Ok(snapshot) => DebugResponse::SnapshotLoaded {
+                            summary: snapshot.format_summary(),
+                        },
+                        Err(e) => DebugResponse::Error {
+                            message: format!("Failed to apply snapshot: {}", e),
+                        },
+                    },
                     Err(e) => DebugResponse::Error {
                         message: format!("Failed to load snapshot: {}", e),
                     },
@@ -236,7 +247,7 @@ impl DebugServer {
                     let mut engine_guard = engine.lock().map_err(|e| {
                         DebuggerError::ExecutionError(format!("Failed to lock engine: {}", e))
                     })?;
-                    
+
                     match engine_guard.execute(&function, args.as_deref()) {
                         Ok(output) => DebugResponse::ExecutionResult {
                             success: true,
@@ -266,12 +277,17 @@ impl DebugServer {
                         Ok(_) => {
                             let state = engine.state();
                             let state_guard = state.lock().map_err(|e| {
-                                DebuggerError::ExecutionError(format!("Failed to lock state: {}", e))
+                                DebuggerError::ExecutionError(format!(
+                                    "Failed to lock state: {}",
+                                    e
+                                ))
                             })?;
 
                             DebugResponse::StepResult {
                                 paused: engine.is_paused(),
-                                current_function: state_guard.current_function().map(|s: &str| s.to_string()),
+                                current_function: state_guard
+                                    .current_function()
+                                    .map(|s: &str| s.to_string()),
                                 step_count: state_guard.step_count() as u64,
                             }
                         }
@@ -351,7 +367,7 @@ impl DebugServer {
                         DebuggerError::ExecutionError(format!("Failed to lock engine: {}", e))
                     })?;
                     let _host = engine_guard.executor().host();
-                    
+
                     // This is a simplified version - in practice, you'd serialize the actual storage
                     DebugResponse::StorageState {
                         storage_json: "{}".to_string(), // Placeholder
@@ -395,7 +411,7 @@ impl DebugServer {
                     })?;
                     let host = engine_guard.executor().host();
                     let budget = host.budget_cloned();
-                    
+
                     let cpu_instructions = budget.get_cpu_insns_consumed().unwrap_or(0);
                     let memory_bytes = budget.get_mem_bytes_consumed().unwrap_or(0);
 
@@ -452,9 +468,7 @@ impl DebugServer {
                 }
             }
 
-            DebugRequest::Disconnect => {
-                DebugResponse::Disconnected
-            }
+            DebugRequest::Disconnect => DebugResponse::Disconnected,
         };
 
         Ok(DebugMessage::response(message.id, response))
@@ -462,8 +476,12 @@ impl DebugServer {
 
     fn load_contract(contract_path: &str) -> Result<(DebuggerEngine, usize)> {
         use std::fs;
-        let wasm_bytes = fs::read(contract_path)
-            .map_err(|e| DebuggerError::WasmLoadError(format!("Failed to read contract {}: {}", contract_path, e)))?;
+        let wasm_bytes = fs::read(contract_path).map_err(|e| {
+            DebuggerError::WasmLoadError(format!(
+                "Failed to read contract {}: {}",
+                contract_path, e
+            ))
+        })?;
         let size = wasm_bytes.len();
         let executor = ContractExecutor::new(wasm_bytes)?;
         let engine = DebuggerEngine::new(executor, vec![]);
@@ -473,8 +491,9 @@ impl DebugServer {
     fn parse_storage(_storage_json: &str) -> Result<String> {
         // Storage parsing is validated but not fully implemented in executor yet
         // Just validate JSON for now
-        serde_json::from_str::<serde_json::Value>(_storage_json)
-            .map_err(|e| DebuggerError::StorageError(format!("Failed to parse storage JSON: {}", e)))?;
+        serde_json::from_str::<serde_json::Value>(_storage_json).map_err(|e| {
+            DebuggerError::StorageError(format!("Failed to parse storage JSON: {}", e))
+        })?;
         Ok(_storage_json.to_string())
     }
 }

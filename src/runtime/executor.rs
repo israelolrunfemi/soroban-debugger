@@ -108,8 +108,7 @@ impl ContractExecutor {
                 Err(DebuggerError::ExecutionError(format!(
                     "Return value conversion failed: {:?}",
                     conv_err
-                ))
-                .into())
+                )))
             }
             Err(Ok(inv_err)) => match inv_err {
                 InvokeError::Contract(code) => {
@@ -206,7 +205,9 @@ impl ContractExecutor {
             .env
             .host()
             .get_diagnostic_events()
-                .map_err(|e| DebuggerError::ExecutionError(format!("Failed to get diagnostic events: {}", e)))?
+            .map_err(|e| {
+                DebuggerError::ExecutionError(format!("Failed to get diagnostic events: {}", e))
+            })?
             .0
             .into_iter()
             .map(|he| he.event)
@@ -240,7 +241,12 @@ impl ContractExecutor {
             self.env
                 .host()
                 .register_test_contract(address.to_object(), dispatcher)
-                    .map_err(|e| DebuggerError::ExecutionError(format!("Failed to register test contract: {}", e)))?;
+                .map_err(|e| {
+                    DebuggerError::ExecutionError(format!(
+                        "Failed to register test contract: {}",
+                        e
+                    ))
+                })?;
         }
 
         Ok(())
