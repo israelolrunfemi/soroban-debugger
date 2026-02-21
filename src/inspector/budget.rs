@@ -81,12 +81,14 @@ impl BudgetInspector {
         let mem_pct = info.memory_percentage();
         if let Some(warning) = Self::create_warning("Memory", mem_pct) {
             warnings.push(warning);
-        // Warn if approaching limits
-        if cpu_percent > 80.0 {
-            crate::logging::log_high_resource_usage("CPU", cpu_percent);
         }
-        if mem_percent > 80.0 {
-            crate::logging::log_high_resource_usage("memory", mem_percent);
+
+        // Warn if approaching limits
+        if cpu_pct > 80.0 {
+            crate::logging::log_high_resource_usage("CPU", cpu_pct);
+        }
+        if mem_pct > 80.0 {
+            crate::logging::log_high_resource_usage("memory", mem_pct);
         }
 
         warnings
@@ -233,6 +235,9 @@ mod tests {
         assert_eq!(warnings.len(), 1);
         assert!(matches!(warnings[0].severity, Severity::Critical));
         assert!(warnings[0].suggestion.is_some());
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryAllocation {
     pub size: u64,

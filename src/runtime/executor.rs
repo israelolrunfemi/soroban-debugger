@@ -62,7 +62,6 @@ impl ContractExecutor {
 
         // Call the contract
         let res = match self.env.try_invoke_contract::<Val, InvokeError>(
-        match self.env.try_invoke_contract::<Val, InvokeError>(
             &self.contract_address,
             &func_symbol,
             args_vec,

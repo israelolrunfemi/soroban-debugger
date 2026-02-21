@@ -68,6 +68,7 @@ impl Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Run a contract function with the debugger
     Run(RunArgs),

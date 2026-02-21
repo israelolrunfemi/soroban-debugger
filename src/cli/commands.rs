@@ -977,7 +977,7 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> crat
         .display();
 
     if let Some((cpu_reg, mem_reg)) = check_regression(&records) {
-        println!("");
+        println!();
         if cpu_reg > 0.0 {
             print_warning(format!(
                 "⚠️ ALERT: CPU usage regression detected! Increased by {:.2}% compared to the previous run.",

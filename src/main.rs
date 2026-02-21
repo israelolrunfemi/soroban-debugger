@@ -50,7 +50,12 @@ fn handle_deprecations(cli: &mut Cli) {
                 args.contract = wasm;
             }
             if let Some(snapshot) = args.snapshot.take() {
-                eprintln!("{}", Formatter::warning("Warning: --snapshot is deprecated. Please use --network-snapshot instead."));
+                eprintln!(
+                    "{}",
+                    Formatter::warning(
+                        "Warning: --snapshot is deprecated. Please use --network-snapshot instead."
+                    )
+                );
                 args.network_snapshot = Some(snapshot);
             }
         }
@@ -60,7 +65,12 @@ fn handle_deprecations(cli: &mut Cli) {
                 args.contract = wasm;
             }
             if let Some(snapshot) = args.snapshot.take() {
-                eprintln!("{}", Formatter::warning("Warning: --snapshot is deprecated. Please use --network-snapshot instead."));
+                eprintln!(
+                    "{}",
+                    Formatter::warning(
+                        "Warning: --snapshot is deprecated. Please use --network-snapshot instead."
+                    )
+                );
                 args.network_snapshot = Some(snapshot);
             }
         }
@@ -76,7 +86,12 @@ fn handle_deprecations(cli: &mut Cli) {
                 args.contract = wasm;
             }
             if let Some(snapshot) = args.snapshot.take() {
-                eprintln!("{}", Formatter::warning("Warning: --snapshot is deprecated. Please use --network-snapshot instead."));
+                eprintln!(
+                    "{}",
+                    Formatter::warning(
+                        "Warning: --snapshot is deprecated. Please use --network-snapshot instead."
+                    )
+                );
                 args.network_snapshot = Some(snapshot);
             }
         }
@@ -136,12 +151,9 @@ fn main() -> Result<()> {
             } else {
                 let mut cmd = Cli::command();
                 cmd.print_help()?;
+                println!();
                 Ok(())
             }
-            let mut cmd = Cli::command();
-            cmd.print_help()?;
-            println!();
-            Ok(())
         }
     };
 

@@ -36,7 +36,10 @@ fn test_threshold_red_at_85() {
     let warnings = BudgetInspector::check_thresholds(&info);
     assert_eq!(warnings.len(), 1);
     assert!(matches!(warnings[0].severity, Severity::Red));
-    assert!(warnings[0].suggestion.is_none(), "85% should not have suggestions");
+    assert!(
+        warnings[0].suggestion.is_none(),
+        "85% should not have suggestions"
+    );
 }
 
 #[test]
@@ -50,10 +53,16 @@ fn test_threshold_critical_at_90() {
     let warnings = BudgetInspector::check_thresholds(&info);
     assert_eq!(warnings.len(), 1);
     assert!(matches!(warnings[0].severity, Severity::Critical));
-    assert!(warnings[0].suggestion.is_some(), "90% MUST have optimization suggestions");
-    
+    assert!(
+        warnings[0].suggestion.is_some(),
+        "90% MUST have optimization suggestions"
+    );
+
     let suggestion = warnings[0].suggestion.as_ref().unwrap();
-    assert!(suggestion.contains("optimizing"), "Suggestion should mention optimization");
+    assert!(
+        suggestion.contains("optimizing"),
+        "Suggestion should mention optimization"
+    );
 }
 
 #[test]
@@ -65,7 +74,11 @@ fn test_multiple_critical_warnings() {
         memory_limit: 100,
     };
     let warnings = BudgetInspector::check_thresholds(&info);
-    assert_eq!(warnings.len(), 2, "Expected warnings for both CPU and Memory");
+    assert_eq!(
+        warnings.len(),
+        2,
+        "Expected warnings for both CPU and Memory"
+    );
     assert!(matches!(warnings[0].severity, Severity::Critical));
     assert!(matches!(warnings[1].severity, Severity::Critical));
 }
