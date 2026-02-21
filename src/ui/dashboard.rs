@@ -234,12 +234,9 @@ impl DashboardApp {
         let cpu_pct = new_budget.cpu_percentage();
         let mem_pct = new_budget.memory_percentage();
 
-        if cpu_pct != self.budget_info.cpu_percentage()
-            && cpu_pct > 80.0 {
-                self.push_log(
-                    LogLevel::Warn,
-                    format!("CPU usage high: {:.1}%", cpu_pct),
-                );
+        if cpu_pct != self.budget_info.cpu_percentage() {
+            if cpu_pct > 80.0 {
+                self.push_log(LogLevel::Warn, format!("CPU usage high: {:.1}%", cpu_pct));
             }
         self.budget_info = new_budget;
 
@@ -258,10 +255,8 @@ impl DashboardApp {
         let new_entries: Vec<(String, String)> = {
             let inspector = crate::inspector::StorageInspector::new();
             let all = inspector.get_all();
-            let mut v: Vec<(String, String)> = all
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let mut v: Vec<(String, String)> =
+                all.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             v.sort_by(|a, b| a.0.cmp(&b.0));
             v
         };
@@ -302,13 +297,11 @@ impl DashboardApp {
         match self.engine.continue_execution() {
             Ok(()) => {
                 self.push_log(LogLevel::Info, "Execution continuing…".to_string());
-                self.status_message =
-                    Some(("Running…".to_string(), StatusKind::Info));
+                self.status_message = Some(("Running…".to_string(), StatusKind::Info));
             }
             Err(e) => {
                 self.push_log(LogLevel::Error, format!("Continue failed: {}", e));
-                self.status_message =
-                    Some((format!("Continue error: {}", e), StatusKind::Error));
+                self.status_message = Some((format!("Continue error: {}", e), StatusKind::Error));
             }
         }
         self.refresh_state();
@@ -348,8 +341,7 @@ impl DashboardApp {
         match self.active_pane {
             ActivePane::CallStack => {
                 let sel = self.call_stack_state.selected().unwrap_or(0);
-                self.call_stack_state
-                    .select(Some(sel.saturating_sub(1)));
+                self.call_stack_state.select(Some(sel.saturating_sub(1)));
             }
             ActivePane::Storage => {
                 let sel = self.storage_state.selected().unwrap_or(0);
@@ -475,18 +467,15 @@ fn ui(f: &mut Frame, app: &mut DashboardApp) {
     let area = f.size();
 
     // Background
-    f.render_widget(
-        Block::default().style(Style::default().bg(COLOR_BG)),
-        area,
-    );
+    f.render_widget(Block::default().style(Style::default().bg(COLOR_BG)), area);
 
     // ── Outer layout: header + body + footer ──────────────────────────────
     let outer = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
-            Constraint::Min(0),     // body
-            Constraint::Length(1),  // status bar
+            Constraint::Length(3), // header
+            Constraint::Min(0),    // body
+            Constraint::Length(1), // status bar
         ])
         .split(area);
 
@@ -512,7 +501,9 @@ fn render_header(f: &mut Frame, app: &DashboardApp, area: Rect) {
         Span::styled("│ ", Style::default().fg(COLOR_BORDER)),
         Span::styled(
             format!(" fn: {} ", app.function_name),
-            Style::default().fg(COLOR_PURPLE).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(COLOR_PURPLE)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::styled("│ ", Style::default().fg(COLOR_BORDER)),
         Span::styled(
@@ -583,9 +574,10 @@ fn render_call_stack(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
     f.render_widget(block, area);
 
     if app.call_stack_frames.is_empty() {
-        let empty = Paragraph::new(Line::from(vec![
-            Span::styled("  (empty — no execution active)", Style::default().fg(COLOR_TEXT_DIM)),
-        ]))
+        let empty = Paragraph::new(Line::from(vec![Span::styled(
+            "  (empty — no execution active)",
+            Style::default().fg(COLOR_TEXT_DIM),
+        )]))
         .style(Style::default().bg(COLOR_SURFACE));
         f.render_widget(empty, inner);
         return;
@@ -623,7 +615,10 @@ fn render_call_stack(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
             };
 
             ListItem::new(Line::from(vec![
-                Span::styled(format!("{}{}", indent, arrow), Style::default().fg(COLOR_TEXT_DIM)),
+                Span::styled(
+                    format!("{}{}", indent, arrow),
+                    Style::default().fg(COLOR_TEXT_DIM),
+                ),
                 Span::styled(frame.function.clone(), frame_style),
                 Span::styled(contract_ctx, Style::default().fg(COLOR_PURPLE)),
                 Span::styled(dur_ctx, Style::default().fg(COLOR_TEXT_DIM)),
@@ -653,12 +648,10 @@ fn render_storage(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
     f.render_widget(block, area);
 
     if app.storage_entries.is_empty() {
-        let msg = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "  (no storage captured — run a contract to populate)",
-                Style::default().fg(COLOR_TEXT_DIM),
-            ),
-        ]))
+        let msg = Paragraph::new(Line::from(vec![Span::styled(
+            "  (no storage captured — run a contract to populate)",
+            Style::default().fg(COLOR_TEXT_DIM),
+        )]))
         .style(Style::default().bg(COLOR_SURFACE))
         .wrap(Wrap { trim: false });
         f.render_widget(msg, inner);
@@ -676,7 +669,10 @@ fn render_storage(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
             let val_display = truncate(v, max_val);
             ListItem::new(Line::from(vec![
                 Span::styled(" ", Style::default()),
-                Span::styled(key_display, Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    key_display,
+                    Style::default().fg(COLOR_CYAN).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" = ", Style::default().fg(COLOR_TEXT_DIM)),
                 Span::styled(val_display, Style::default().fg(COLOR_TEXT)),
             ]))
@@ -726,13 +722,13 @@ fn render_budget(f: &mut Frame, app: &DashboardApp, area: Rect) {
         .direction(Direction::Vertical)
         .margin(1)
         .constraints([
-            Constraint::Length(2),  // CPU label
-            Constraint::Length(1),  // CPU gauge
-            Constraint::Length(1),  // spacer
-            Constraint::Length(2),  // MEM label
-            Constraint::Length(1),  // MEM gauge
-            Constraint::Length(1),  // spacer
-            Constraint::Min(0),     // details
+            Constraint::Length(2), // CPU label
+            Constraint::Length(1), // CPU gauge
+            Constraint::Length(1), // spacer
+            Constraint::Length(2), // MEM label
+            Constraint::Length(1), // MEM gauge
+            Constraint::Length(1), // spacer
+            Constraint::Min(0),    // details
         ])
         .split(inner);
 
@@ -740,9 +736,16 @@ fn render_budget(f: &mut Frame, app: &DashboardApp, area: Rect) {
     let cpu_pct = app.budget_info.cpu_percentage();
     let cpu_color = gauge_color(cpu_pct);
     let cpu_label = Paragraph::new(Line::from(vec![
-        Span::styled("  CPU Instructions  ", Style::default().fg(COLOR_TEXT).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{:>12} / {:<12}", fmt_num(app.budget_info.cpu_instructions), fmt_num(app.budget_info.cpu_limit)),
+            "  CPU Instructions  ",
+            Style::default().fg(COLOR_TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{:>12} / {:<12}",
+                fmt_num(app.budget_info.cpu_instructions),
+                fmt_num(app.budget_info.cpu_limit)
+            ),
             Style::default().fg(COLOR_TEXT_DIM),
         ),
         Span::styled(
@@ -771,9 +774,16 @@ fn render_budget(f: &mut Frame, app: &DashboardApp, area: Rect) {
     let mem_pct = app.budget_info.memory_percentage();
     let mem_color = gauge_color(mem_pct);
     let mem_label = Paragraph::new(Line::from(vec![
-        Span::styled("  Memory Bytes      ", Style::default().fg(COLOR_TEXT).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{:>12} / {:<12}", fmt_bytes(app.budget_info.memory_bytes), fmt_bytes(app.budget_info.memory_limit)),
+            "  Memory Bytes      ",
+            Style::default().fg(COLOR_TEXT).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(
+                "{:>12} / {:<12}",
+                fmt_bytes(app.budget_info.memory_bytes),
+                fmt_bytes(app.budget_info.memory_limit)
+            ),
             Style::default().fg(COLOR_TEXT_DIM),
         ),
         Span::styled(
@@ -844,8 +854,8 @@ fn render_log(f: &mut Frame, app: &mut DashboardApp, area: Rect) {
     f.render_widget(block, area);
 
     if app.log_entries.is_empty() {
-        let msg = Paragraph::new("  (no log entries yet)")
-            .style(Style::default().fg(COLOR_TEXT_DIM));
+        let msg =
+            Paragraph::new("  (no log entries yet)").style(Style::default().fg(COLOR_TEXT_DIM));
         f.render_widget(msg, inner);
         return;
     }
@@ -942,10 +952,7 @@ fn render_status_bar(f: &mut Frame, app: &DashboardApp, area: Rect) {
                 .bg(COLOR_SURFACE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            " │ ",
-            Style::default().fg(COLOR_BORDER).bg(COLOR_SURFACE),
-        ),
+        Span::styled(" │ ", Style::default().fg(COLOR_BORDER).bg(COLOR_SURFACE)),
         Span::styled(
             format!(" {} ", msg),
             Style::default().fg(msg_color).bg(COLOR_SURFACE),
@@ -982,34 +989,41 @@ fn render_help_overlay(f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Navigation", Style::default().fg(COLOR_PURPLE).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Navigation",
+            Style::default()
+                .fg(COLOR_PURPLE)
+                .add_modifier(Modifier::BOLD),
+        )]),
         bind("Tab / Shift+Tab", "Cycle panes forward / backward"),
         bind("1 / 2 / 3 / 4", "Jump directly to pane"),
         bind("↑ / k", "Scroll active pane up"),
         bind("↓ / j", "Scroll active pane down"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  Debugger Actions", Style::default().fg(COLOR_PURPLE).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Debugger Actions",
+            Style::default()
+                .fg(COLOR_PURPLE)
+                .add_modifier(Modifier::BOLD),
+        )]),
         bind("s / S", "Step (one instruction)"),
         bind("c", "Continue execution"),
         bind("r / R", "Refresh state manually"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("  General", Style::default().fg(COLOR_PURPLE).add_modifier(Modifier::BOLD)),
-        ]),
+        Line::from(vec![Span::styled(
+            "  General",
+            Style::default()
+                .fg(COLOR_PURPLE)
+                .add_modifier(Modifier::BOLD),
+        )]),
         bind("?", "Toggle this help overlay"),
         bind("q / Q", "Quit dashboard"),
         bind("Ctrl+C", "Force quit"),
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "  Press ? again to close",
-                Style::default().fg(COLOR_TEXT_DIM),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            "  Press ? again to close",
+            Style::default().fg(COLOR_TEXT_DIM),
+        )]),
     ];
 
     let help_widget = Paragraph::new(help_lines)
@@ -1056,8 +1070,16 @@ fn pane_block(title: &str, num: &str, is_active: bool) -> Block<'static> {
         .title(Span::styled(
             title_str,
             Style::default()
-                .fg(if is_active { COLOR_ACCENT } else { COLOR_TEXT_DIM })
-                .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+                .fg(if is_active {
+                    COLOR_ACCENT
+                } else {
+                    COLOR_TEXT_DIM
+                })
+                .add_modifier(if is_active {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
         ))
         .borders(Borders::ALL)
         .border_type(if is_active {
