@@ -89,6 +89,10 @@ fn main() -> Result<()> {
                 cmd.print_help()?;
                 Ok(())
             }
+            let mut cmd = Cli::command();
+            cmd.print_help()?;
+            println!();
+            Ok(())
         }
     };
 

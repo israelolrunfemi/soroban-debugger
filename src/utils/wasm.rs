@@ -1,5 +1,5 @@
 use crate::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wasmparser::{Parser, Payload};
 
 // ─── existing public API (unchanged) ─────────────────────────────────────────
@@ -23,22 +23,118 @@ pub fn parse_functions(wasm_bytes: &[u8]) -> Result<Vec<String>> {
     Ok(functions)
 }
 
-/// Get high-level module statistics from a WASM binary.
+/// Get high-level module statistics and section breakdown from a WASM binary.
 pub fn get_module_info(wasm_bytes: &[u8]) -> Result<ModuleInfo> {
-    let mut info = ModuleInfo::default();
+    let mut info = ModuleInfo {
+        total_size: wasm_bytes.len(),
+        ..ModuleInfo::default()
+    };
     let parser = Parser::new(0);
 
     for payload in parser.parse_all(wasm_bytes) {
-        match payload? {
+        let payload = payload?;
+        match &payload {
             Payload::Version { .. } => {}
             Payload::TypeSection(reader) => {
                 info.type_count = reader.count();
+                info.sections.push(WasmSection {
+                    name: "Type".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::ImportSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Import".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
             }
             Payload::FunctionSection(reader) => {
                 info.function_count = reader.count();
+                info.sections.push(WasmSection {
+                    name: "Function".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::TableSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Table".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::MemorySection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Memory".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::GlobalSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Global".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
             }
             Payload::ExportSection(reader) => {
                 info.export_count = reader.count();
+                info.sections.push(WasmSection {
+                    name: "Export".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::StartSection { range, .. } => {
+                info.sections.push(WasmSection {
+                    name: "Start".to_string(),
+                    size: range.end - range.start,
+                    offset: range.start,
+                });
+            }
+            Payload::ElementSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Element".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::CodeSectionStart { range, .. } => {
+                info.sections.push(WasmSection {
+                    name: "Code".to_string(),
+                    size: range.end - range.start,
+                    offset: range.start,
+                });
+            }
+            Payload::CodeSectionEntry(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Code (Entry)".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::DataSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Data".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::DataCountSection { range, .. } => {
+                info.sections.push(WasmSection {
+                    name: "Data Count".to_string(),
+                    size: range.end - range.start,
+                    offset: range.start,
+                });
+            }
+            Payload::CustomSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: format!("Custom ({})", reader.name()),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
             }
             _ => {}
         }
@@ -48,11 +144,21 @@ pub fn get_module_info(wasm_bytes: &[u8]) -> Result<ModuleInfo> {
 }
 
 /// Information about a WASM module.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct ModuleInfo {
+    pub total_size: usize,
     pub type_count: u32,
     pub function_count: u32,
     pub export_count: u32,
+    pub sections: Vec<WasmSection>,
+}
+
+/// Represents a single section within a WASM binary.
+#[derive(Debug, Serialize, Clone)]
+pub struct WasmSection {
+    pub name: String,
+    pub size: usize,
+    pub offset: usize,
 }
 
 // ─── metadata types ───────────────────────────────────────────────────────────
@@ -226,6 +332,135 @@ pub fn extract_contract_metadata(wasm_bytes: &[u8]) -> Result<ContractMetadata> 
     Ok(metadata)
 }
 
+// ─── contract spec / function signatures ─────────────────────────────────────
+
+/// A single function parameter: name and its Soroban type as a display string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionParam {
+    pub name: String,
+    pub type_name: String,
+}
+
+/// Full signature for one exported contract function.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSignature {
+    pub name: String,
+    pub params: Vec<FunctionParam>,
+    pub return_type: Option<String>,
+}
+
+/// Convert an XDR `ScSpecTypeDef` into a human-readable type string.
+fn spec_type_to_string(ty: &stellar_xdr::curr::ScSpecTypeDef) -> String {
+    use stellar_xdr::curr::ScSpecTypeDef as T;
+    match ty {
+        T::Val => "Val".into(),
+        T::Bool => "Bool".into(),
+        T::Void => "Void".into(),
+        T::Error => "Error".into(),
+        T::U32 => "U32".into(),
+        T::I32 => "I32".into(),
+        T::U64 => "U64".into(),
+        T::I64 => "I64".into(),
+        T::Timepoint => "Timepoint".into(),
+        T::Duration => "Duration".into(),
+        T::U128 => "U128".into(),
+        T::I128 => "I128".into(),
+        T::U256 => "U256".into(),
+        T::I256 => "I256".into(),
+        T::Bytes => "Bytes".into(),
+        T::String => "String".into(),
+        T::Symbol => "Symbol".into(),
+        T::Address => "Address".into(),
+        T::Option(o) => format!("Option<{}>", spec_type_to_string(&o.value_type)),
+        T::Result(r) => format!(
+            "Result<{}, {}>",
+            spec_type_to_string(&r.ok_type),
+            spec_type_to_string(&r.error_type),
+        ),
+        T::Vec(v) => format!("Vec<{}>", spec_type_to_string(&v.element_type)),
+        T::Map(m) => format!(
+            "Map<{}, {}>",
+            spec_type_to_string(&m.key_type),
+            spec_type_to_string(&m.value_type),
+        ),
+        T::Tuple(t) => {
+            let inner: Vec<String> = t.value_types.iter().map(spec_type_to_string).collect();
+            format!("Tuple<{}>", inner.join(", "))
+        }
+        T::BytesN(b) => format!("BytesN<{}>", b.n),
+        T::Udt(u) => std::str::from_utf8(u.name.as_slice())
+            .unwrap_or("Udt")
+            .to_string(),
+    }
+}
+
+/// Helper: convert a `StringM<N>` slice to an owned `String` lossily.
+fn stringm_to_string(bytes: &[u8]) -> String {
+    std::str::from_utf8(bytes)
+        .unwrap_or("<invalid utf8>")
+        .to_string()
+}
+
+/// Parse full function signatures from the WASM `contractspecv0` custom section.
+///
+/// Returns an empty `Vec` (not an error) when no spec section is present —
+/// this keeps callers simple and backward-compatible with contracts that
+/// pre-date the spec section.
+pub fn parse_function_signatures(wasm_bytes: &[u8]) -> Result<Vec<FunctionSignature>> {
+    use stellar_xdr::curr::{Limited, Limits, ReadXdr, ScSpecEntry};
+
+    let mut signatures = Vec::new();
+    let parser = Parser::new(0);
+
+    for payload in parser.parse_all(wasm_bytes) {
+        let Payload::CustomSection(reader) = payload? else {
+            continue;
+        };
+
+        if reader.name() != "contractspecv0" {
+            continue;
+        }
+
+        let data = reader.data();
+        let cursor = std::io::Cursor::new(data);
+        let mut limited = Limited::new(cursor, Limits::none());
+
+        // The section is a packed sequence of XDR-encoded ScSpecEntry values.
+        loop {
+            match ScSpecEntry::read_xdr(&mut limited) {
+                Ok(ScSpecEntry::FunctionV0(func)) => {
+                    let name = stringm_to_string(func.name.0.as_slice());
+
+                    let params = func
+                        .inputs
+                        .iter()
+                        .map(|input| FunctionParam {
+                            name: stringm_to_string(input.name.as_slice()),
+                            type_name: spec_type_to_string(&input.type_),
+                        })
+                        .collect();
+
+                    let return_type = func.outputs.first().map(spec_type_to_string);
+
+                    signatures.push(FunctionSignature {
+                        name,
+                        params,
+                        return_type,
+                    });
+                }
+                Ok(_) => {
+                    // UDT definitions, events, etc. — skip
+                }
+                Err(_) => break, // end of section or corrupt data
+            }
+        }
+
+        break; // only one contractspecv0 section exists per contract
+    }
+
+    Ok(signatures)
+}
+
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -365,7 +600,22 @@ implementation_notes=Line-based format
         assert!(meta.is_empty());
     }
 
-    // ── ContractMetadata::is_empty ────────────────────────────────────────────
+    #[test]
+    fn test_get_module_info_with_sections() {
+        let wasm = make_custom_section_wasm("test_section", &[0x01, 0x02, 0x03]);
+        let info = get_module_info(&wasm).expect("should parse");
+
+        assert_eq!(info.total_size, wasm.len());
+        // Should have at least the custom section
+        assert!(!info.sections.is_empty());
+        let custom_section = info
+            .sections
+            .iter()
+            .find(|s| s.name.contains("test_section"));
+        assert!(custom_section.is_some());
+        // Payload size: name length byte (1) + section name bytes (12) + data bytes (3).
+        assert_eq!(custom_section.unwrap().size, 1 + 12 + 3);
+    }
 
     #[test]
     fn contract_metadata_is_empty_when_default() {

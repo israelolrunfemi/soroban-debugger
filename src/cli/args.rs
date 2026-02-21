@@ -49,6 +49,10 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Commands>,
+
+    /// Show detailed version information
+    #[arg(long)]
+    pub version_verbose: bool,
 }
 impl Cli {
     /// Get the effective verbosity level
@@ -167,6 +171,17 @@ pub struct RunArgs {
     /// Execute contract in dry-run mode: simulate execution without persisting storage changes
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Export storage state to JSON file after execution
+    #[arg(long)]
+    pub export_storage: Option<PathBuf>,
+
+    /// Import storage state from JSON file before execution
+    #[arg(long)]
+    pub import_storage: Option<PathBuf>,
+    /// Path to JSON file containing array of argument sets for batch execution
+    #[arg(long)]
+    pub batch_args: Option<PathBuf>,
 }
 
 impl RunArgs {

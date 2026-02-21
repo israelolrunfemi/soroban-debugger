@@ -28,8 +28,79 @@ fn print_warning(message: impl AsRef<str>) {
     println!("{}", Formatter::warning(message));
 }
 
+/// Execute batch mode with parallel execution
+fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
+    print_info(format!("Loading contract: {:?}", args.contract));
+    logging::log_loading_contract(&args.contract.to_string_lossy());
+
+    let wasm_bytes = fs::read(&args.contract)
+        .with_context(|| format!("Failed to read WASM file: {:?}", args.contract))?;
+
+    print_success(format!(
+        "Contract loaded successfully ({} bytes)",
+        wasm_bytes.len()
+    ));
+    logging::log_contract_loaded(wasm_bytes.len());
+
+    print_info(format!("Loading batch file: {:?}", batch_file));
+    let batch_items = crate::batch::BatchExecutor::load_batch_file(batch_file)?;
+    print_success(format!("Loaded {} test cases", batch_items.len()));
+
+    if let Some(snapshot_path) = &args.network_snapshot {
+        print_info(format!("\nLoading network snapshot: {:?}", snapshot_path));
+        logging::log_loading_snapshot(&snapshot_path.to_string_lossy());
+        let loader = SnapshotLoader::from_file(snapshot_path)?;
+        let loaded_snapshot = loader.apply_to_environment()?;
+        logging::log_display(loaded_snapshot.format_summary(), logging::LogLevel::Info);
+    }
+
+    print_info(format!(
+        "\nExecuting {} test cases in parallel for function: {}",
+        batch_items.len(),
+        args.function
+    ));
+    logging::log_execution_start(&args.function, None);
+
+    let executor = crate::batch::BatchExecutor::new(wasm_bytes, args.function.clone());
+    let results = executor.execute_batch(batch_items)?;
+    let summary = crate::batch::BatchExecutor::summarize(&results);
+
+    crate::batch::BatchExecutor::display_results(&results, &summary);
+
+    if args.json
+        || args
+            .format
+            .as_deref()
+            .map(|f| f.eq_ignore_ascii_case("json"))
+            .unwrap_or(false)
+    {
+        let output = serde_json::json!({
+            "results": results,
+            "summary": summary,
+        });
+        println!("\n{}", serde_json::to_string_pretty(&output)?);
+    }
+
+    logging::log_execution_complete(&format!("{}/{} passed", summary.passed, summary.total));
+
+    if summary.failed > 0 || summary.errors > 0 {
+        anyhow::bail!(
+            "Batch execution completed with failures: {} failed, {} errors",
+            summary.failed,
+            summary.errors
+        );
+    }
+
+    Ok(())
+}
+
 /// Execute the run command.
 pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
+    // Handle batch execution mode
+    if let Some(batch_file) = &args.batch_args {
+        return run_batch(&args, batch_file);
+    }
+
     if args.dry_run {
         return run_dry_run(&args);
     }
@@ -60,11 +131,19 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         None
     };
 
-    let initial_storage = if let Some(storage_json) = &args.storage {
+    let mut initial_storage = if let Some(storage_json) = &args.storage {
         Some(parse_storage(storage_json)?)
     } else {
         None
     };
+
+    // Import storage if specified
+    if let Some(import_path) = &args.import_storage {
+        print_info(format!("Importing storage from: {:?}", import_path));
+        let imported = crate::inspector::storage::StorageState::import_from_file(import_path)?;
+        print_success(format!("Imported {} storage entries", imported.len()));
+        initial_storage = Some(serde_json::to_string(&imported)?);
+    }
 
     if let Some(n) = args.repeat {
         logging::log_repeat_execution(&args.function, n as usize);
@@ -129,6 +208,17 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
             memory_used: budget.memory_bytes,
         };
         let _ = manager.append_record(record);
+    }
+
+    // Export storage if specified
+    if let Some(export_path) = &args.export_storage {
+        print_info(format!("Exporting storage to: {:?}", export_path));
+        let storage_snapshot = engine.executor().get_storage_snapshot()?;
+        crate::inspector::storage::StorageState::export_to_file(&storage_snapshot, export_path)?;
+        print_success(format!(
+            "Exported {} storage entries",
+            storage_snapshot.len()
+        ));
     }
 
     let mut json_events = None;
@@ -600,6 +690,7 @@ pub fn profile(args: ProfileArgs) -> Result<()> {
 
     Ok(())
 }
+
 /// Execute the upgrade-check command.
 pub fn upgrade_check(args: UpgradeCheckArgs, _verbosity: Verbosity) -> Result<()> {
     print_info("Comparing contracts...");
