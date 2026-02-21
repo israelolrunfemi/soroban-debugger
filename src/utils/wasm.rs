@@ -247,44 +247,46 @@ pub struct FunctionSignature {
 fn spec_type_to_string(ty: &stellar_xdr::curr::ScSpecTypeDef) -> String {
     use stellar_xdr::curr::ScSpecTypeDef as T;
     match ty {
-        T::Val => "Val".into(),
-        T::Bool => "Bool".into(),
-        T::Void => "Void".into(),
-        T::Error => "Error".into(),
-        T::U32 => "U32".into(),
-        T::I32 => "I32".into(),
-        T::U64 => "U64".into(),
-        T::I64 => "I64".into(),
+        T::Val       => "Val".into(),
+        T::Bool      => "Bool".into(),
+        T::Void      => "Void".into(),
+        T::Error     => "Error".into(),
+        T::U32       => "U32".into(),
+        T::I32       => "I32".into(),
+        T::U64       => "U64".into(),
+        T::I64       => "I64".into(),
         T::Timepoint => "Timepoint".into(),
-        T::Duration => "Duration".into(),
-        T::U128 => "U128".into(),
-        T::I128 => "I128".into(),
-        T::U256 => "U256".into(),
-        T::I256 => "I256".into(),
-        T::Bytes => "Bytes".into(),
-        T::String => "String".into(),
-        T::Symbol => "Symbol".into(),
-        T::Address => "Address".into(),
+        T::Duration  => "Duration".into(),
+        T::U128      => "U128".into(),
+        T::I128      => "I128".into(),
+        T::U256      => "U256".into(),
+        T::I256      => "I256".into(),
+        T::Bytes     => "Bytes".into(),
+        T::String    => "String".into(),
+        T::Symbol    => "Symbol".into(),
+        T::Address   => "Address".into(),
         T::Option(o) => format!("Option<{}>", spec_type_to_string(&o.value_type)),
         T::Result(r) => format!(
             "Result<{}, {}>",
             spec_type_to_string(&r.ok_type),
             spec_type_to_string(&r.error_type),
         ),
-        T::Vec(v) => format!("Vec<{}>", spec_type_to_string(&v.element_type)),
-        T::Map(m) => format!(
+        T::Vec(v)    => format!("Vec<{}>", spec_type_to_string(&v.element_type)),
+        T::Map(m)    => format!(
             "Map<{}, {}>",
             spec_type_to_string(&m.key_type),
             spec_type_to_string(&m.value_type),
         ),
-        T::Tuple(t) => {
+        T::Tuple(t)  => {
             let inner: Vec<String> = t.value_types.iter().map(spec_type_to_string).collect();
             format!("Tuple<{}>", inner.join(", "))
         }
         T::BytesN(b) => format!("BytesN<{}>", b.n),
-        T::Udt(u) => std::str::from_utf8(u.name.as_slice())
-            .unwrap_or("Udt")
-            .to_string(),
+        T::Udt(u)    => {
+            std::str::from_utf8(u.name.as_slice())
+                .unwrap_or("Udt")
+                .to_string()
+        }
     }
 }
 
@@ -329,18 +331,17 @@ pub fn parse_function_signatures(wasm_bytes: &[u8]) -> Result<Vec<FunctionSignat
                         .inputs
                         .iter()
                         .map(|input| FunctionParam {
-                            name: stringm_to_string(input.name.as_slice()),
+                            name:      stringm_to_string(input.name.as_slice()),
                             type_name: spec_type_to_string(&input.type_),
                         })
                         .collect();
 
-                    let return_type = func.outputs.first().map(spec_type_to_string);
+                    let return_type = func
+                        .outputs
+                        .first()
+                        .map(spec_type_to_string);
 
-                    signatures.push(FunctionSignature {
-                        name,
-                        params,
-                        return_type,
-                    });
+                    signatures.push(FunctionSignature { name, params, return_type });
                 }
                 Ok(_) => {
                     // UDT definitions, events, etc. — skip
