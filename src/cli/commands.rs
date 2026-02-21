@@ -1,6 +1,6 @@
 use crate::cli::args::{
-    CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RunArgs,
-    UpgradeCheckArgs, Verbosity,
+    CompareArgs, InspectArgs, InteractiveArgs, ListFunctionsArgs, OptimizeArgs, ProfileArgs,
+    RunArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
@@ -13,6 +13,9 @@ use crate::ui::tui::DebuggerUI;
 use crate::Result;
 use anyhow::Context;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 
 fn print_info(message: impl AsRef<str>) {
     println!("{}", Formatter::info(message));
@@ -24,6 +27,21 @@ fn print_success(message: impl AsRef<str>) {
 
 fn print_warning(message: impl AsRef<str>) {
     println!("{}", Formatter::warning(message));
+}
+
+fn write_to_file(path: &Path, content: &str, append: bool) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)
+        .with_context(|| format!("Failed to open file: {:?}", path))?;
+
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("Failed to write to file: {:?}", path))?;
+
+    Ok(())
 }
 
 /// Execute batch mode with parallel execution
@@ -129,11 +147,19 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         None
     };
 
-    let initial_storage = if let Some(storage_json) = &args.storage {
+    let mut initial_storage = if let Some(storage_json) = &args.storage {
         Some(parse_storage(storage_json)?)
     } else {
         None
     };
+
+    // Import storage if specified
+    if let Some(import_path) = &args.import_storage {
+        print_info(format!("Importing storage from: {:?}", import_path));
+        let imported = crate::inspector::storage::StorageState::import_from_file(import_path)?;
+        print_success(format!("Imported {} storage entries", imported.len()));
+        initial_storage = Some(serde_json::to_string(&imported)?);
+    }
 
     if let Some(n) = args.repeat {
         logging::log_repeat_execution(&args.function, n as usize);
@@ -155,8 +181,29 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         executor.set_initial_storage(storage)?;
     }
 
+    let host = executor.host();
+    let initial_memory =
+        crate::inspector::budget::BudgetInspector::get_cpu_usage(host).memory_bytes;
+    let mut memory_tracker = crate::inspector::budget::MemoryTracker::new(initial_memory);
+    let mut instruction_counter = crate::inspector::instructions::InstructionCounter::new();
+
     let mut engine = DebuggerEngine::new(executor, args.breakpoint);
 
+    if args.generate_test {
+        engine.enable_test_generation(args.test_output_dir);
+    }
+
+    // Execute with debugging
+    println!("\n--- Execution Start ---\n");
+    let execution_result = engine.execute(&args.function, parsed_args.as_deref())?;
+    println!("\n--- Execution Complete ---\n");
+
+    if args.json {
+        let json_output = serde_json::json!({
+            "result": execution_result.result,
+            "execution_time_ms": execution_result.execution_time_ms,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_output)?);
     if args.instruction_debug {
         print_info("Enabling instruction-level debugging...");
         engine.enable_instruction_debug(&wasm_bytes)?;
@@ -174,10 +221,47 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     }
 
     print_info("\n--- Execution Start ---\n");
+    memory_tracker.record_snapshot(engine.executor().host(), "before_execution");
+    instruction_counter.start_function(&args.function, engine.executor().host());
     let result = engine.execute(&args.function, parsed_args.as_deref())?;
+    instruction_counter.end_function(engine.executor().host());
+
+    if let Ok(diagnostic_events) = engine.executor().get_diagnostic_events() {
+        let mut previous_memory = initial_memory;
+        for (idx, _event) in diagnostic_events.iter().enumerate() {
+            let current_memory =
+                crate::inspector::budget::BudgetInspector::get_cpu_usage(engine.executor().host())
+                    .memory_bytes;
+            if current_memory != previous_memory {
+                memory_tracker.record_memory_change(
+                    previous_memory,
+                    current_memory,
+                    &format!("diagnostic_event_{}", idx),
+                );
+                previous_memory = current_memory;
+            }
+        }
+    }
+
+    memory_tracker.record_snapshot(engine.executor().host(), "after_execution");
     print_success("\n--- Execution Complete ---\n");
     print_success(format!("Result: {:?}", result));
     logging::log_execution_complete(&result);
+
+    // Export storage if specified
+    if let Some(export_path) = &args.export_storage {
+        print_info(format!("Exporting storage to: {:?}", export_path));
+        let storage_snapshot = engine.executor().get_storage_snapshot()?;
+        crate::inspector::storage::StorageState::export_to_file(&storage_snapshot, export_path)?;
+        print_success(format!(
+            "Exported {} storage entries",
+            storage_snapshot.len()
+        ));
+    }
+    let memory_summary = memory_tracker.finalize(engine.executor().host());
+    memory_summary.display();
+
+    instruction_counter.display();
 
     let mut json_events = None;
     if args.show_events {
@@ -232,13 +316,14 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         json_auth = Some(auth_tree);
     }
 
-    if args.json
+    let is_json_output = args.json
         || args
             .format
             .as_deref()
             .map(|f| f.eq_ignore_ascii_case("json"))
-            .unwrap_or(false)
-    {
+            .unwrap_or(false);
+
+    let output_content = if is_json_output {
         let mut output = serde_json::json!({
             "result": result,
         });
@@ -261,7 +346,63 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
             output["auth"] = serde_json::to_value(auth_tree).unwrap_or(serde_json::Value::Null);
         }
 
-        println!("{}", serde_json::to_string_pretty(&output)?);
+        let memory_json = serde_json::to_value(&memory_summary).unwrap_or(serde_json::Value::Null);
+        output["memory"] = memory_json;
+
+        let instruction_counts = instruction_counter.get_counts();
+        let instruction_json =
+            serde_json::to_value(instruction_counts).unwrap_or(serde_json::Value::Null);
+        output["instruction_counts"] = instruction_json;
+
+        let content = serde_json::to_string_pretty(&output)?;
+        println!("{}", content);
+        content
+    } else {
+        let mut text_output = Vec::new();
+        text_output.push(format!("Result: {:?}", result));
+
+        let memory_text = format!(
+            "\n=== Memory Allocation Summary ===\nPeak Memory Usage: {} bytes\nAllocation Count: {}\nTotal Allocated Bytes: {} bytes\nInitial Memory: {} bytes\nFinal Memory: {} bytes\nMemory Delta: {} bytes",
+            memory_summary.peak_memory,
+            memory_summary.allocation_count,
+            memory_summary.total_allocated_bytes,
+            memory_summary.initial_memory,
+            memory_summary.final_memory,
+            memory_summary.final_memory.saturating_sub(memory_summary.initial_memory)
+        );
+        text_output.push(memory_text);
+
+        if let Some(events) = json_events {
+            text_output.push("\n--- Events ---".to_string());
+            for (i, event) in events.iter().enumerate() {
+                text_output.push(format!("Event #{}:", i));
+                text_output.push(format!(
+                    "  Contract: {}",
+                    event.contract_id.as_deref().unwrap_or("<none>")
+                ));
+                text_output.push(format!("  Topics: {:?}", event.topics));
+                text_output.push(format!("  Data: {}", event.data));
+            }
+        }
+
+        if let Some(auth_tree) = json_auth {
+            text_output.push("\n--- Authorizations ---".to_string());
+            let auth_json = serde_json::to_string_pretty(&auth_tree)
+                .unwrap_or_else(|_| "Failed to serialize auth tree".to_string());
+            text_output.push(auth_json);
+        }
+
+        text_output.join("\n")
+    };
+
+    if let Some(output_path) = &args.save_output {
+        write_to_file(output_path, &output_content, args.append)?;
+        let mode = if args.append {
+            "appended to"
+        } else {
+            "written to"
+        };
+        print_success(format!("Results {}: {:?}", mode, output_path));
     }
 
     Ok(())
@@ -298,49 +439,9 @@ fn run_dry_run(args: &RunArgs) -> Result<()> {
     let initial_storage = if let Some(storage_json) = &args.storage {
         Some(parse_storage(storage_json)?)
     } else {
-        None
-    };
-
-    let mut executor = ContractExecutor::new(wasm_bytes)?;
-    if let Some(storage) = initial_storage {
-        executor.set_initial_storage(storage)?;
+        println!("Result: {}", execution_result.result);
+        println!("Execution Time: {:.2}ms", execution_result.execution_time_ms);
     }
-
-    let storage_snapshot = executor.snapshot_storage()?;
-
-    let mut engine = DebuggerEngine::new(executor, args.breakpoint.clone());
-
-    print_info("\n[DRY RUN] --- Execution Start ---\n");
-    let result = engine.execute(&args.function, parsed_args.as_deref())?;
-    print_success("\n[DRY RUN] --- Execution Complete ---\n");
-    print_success(format!("[DRY RUN] Result: {:?}", result));
-
-    if args.show_events {
-        print_info("\n[DRY RUN] --- Events ---");
-        let events = engine.executor().get_events()?;
-        let filtered_events = if let Some(topic) = &args.filter_topic {
-            crate::inspector::events::EventInspector::filter_events(&events, topic)
-        } else {
-            events
-        };
-
-        if filtered_events.is_empty() {
-            print_warning("[DRY RUN] No events captured.");
-        } else {
-            for (i, event) in filtered_events.iter().enumerate() {
-                print_info(format!("[DRY RUN] Event #{}:", i));
-                print_info(format!(
-                    "[DRY RUN]   Contract: {}",
-                    event.contract_id.as_deref().unwrap_or("<none>")
-                ));
-                print_info(format!("[DRY RUN]   Topics: {:?}", event.topics));
-                print_info(format!("[DRY RUN]   Data: {}", event.data));
-            }
-        }
-    }
-
-    engine.executor_mut().restore_storage(&storage_snapshot)?;
-    print_success("\n[DRY RUN] Storage state restored (changes rolled back)");
 
     Ok(())
 }
@@ -453,6 +554,19 @@ pub fn inspect(args: InspectArgs, _verbosity: Verbosity) -> Result<()> {
 
     println!("\n{}", "=".repeat(54));
     Ok(())
+}
+
+/// Execute the list-functions command (shorthand for `inspect --functions`).
+///
+/// Constructs an [`InspectArgs`] with `functions: true` and delegates
+/// entirely to [`inspect`], guaranteeing identical output.
+pub fn list_functions(args: ListFunctionsArgs, verbosity: Verbosity) -> Result<()> {
+    let inspect_args = InspectArgs {
+        contract: args.contract,
+        functions: true,
+        metadata: false,
+    };
+    inspect(inspect_args, verbosity)
 }
 
 /// Parse JSON arguments with validation.

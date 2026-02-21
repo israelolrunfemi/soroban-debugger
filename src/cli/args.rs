@@ -79,6 +79,9 @@ pub enum Commands {
 
     /// Compare two execution trace JSON files side-by-side
     Compare(CompareArgs),
+
+    /// List exported functions of a contract (shorthand for `inspect --functions`)
+    ListFunctions(ListFunctionsArgs),
 }
 
 #[derive(Parser)]
@@ -119,19 +122,7 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub verbose: bool,
 
-    /// Output format (text, json)
-    #[arg(long)]
-    pub format: Option<String>,
-
-    /// Show contract events emitted during execution
-    #[arg(long)]
-    pub show_events: bool,
-
-    /// Show authorization tree during execution
-    #[arg(long)]
-    pub show_auth: bool,
-
-    /// Output format as JSON
+    /// Output in JSON format
     #[arg(long)]
     pub json: bool,
 
@@ -165,9 +156,31 @@ pub struct RunArgs {
     #[arg(long)]
     pub dry_run: bool,
 
+    /// Export storage state to JSON file after execution
+    #[arg(long)]
+    pub export_storage: Option<PathBuf>,
+
+    /// Import storage state from JSON file before execution
+    #[arg(long)]
+    pub import_storage: Option<PathBuf>,
     /// Path to JSON file containing array of argument sets for batch execution
     #[arg(long)]
     pub batch_args: Option<PathBuf>,
+
+    /// Automatically generate a Rust unit test from this execution
+    #[arg(long)]
+    pub generate_test: bool,
+
+    /// Directory to write generated tests to
+    #[arg(long, default_value = "tests/generated")]
+    pub test_output_dir: PathBuf,
+    /// Save execution results to file
+    #[arg(long)]
+    pub save_output: Option<PathBuf>,
+
+    /// Append to output file instead of overwriting
+    #[arg(long, requires = "save_output")]
+    pub append: bool,
 }
 
 impl RunArgs {
@@ -246,6 +259,15 @@ pub struct InspectArgs {
     /// Output format as JSON
     #[arg(long)]
     pub json: bool,
+}
+
+/// Args for the `list-functions` shorthand command.
+/// Delegates to `inspect --functions` under the hood.
+#[derive(Parser)]
+pub struct ListFunctionsArgs {
+    /// Path to the contract WASM file
+    #[arg(short, long)]
+    pub contract: PathBuf,
 }
 
 #[derive(Parser)]
