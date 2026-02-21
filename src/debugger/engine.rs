@@ -2,6 +2,7 @@ use crate::debugger::breakpoint::BreakpointManager;
 use crate::debugger::instruction_pointer::StepMode;
 use crate::debugger::state::DebugState;
 use crate::debugger::stepper::Stepper;
+use crate::plugin::{EventContext, ExecutionEvent, PluginRegistry};
 use crate::runtime::executor::ContractExecutor;
 use crate::runtime::instruction::Instruction;
 use crate::runtime::instrumentation::Instrumenter;
@@ -18,6 +19,8 @@ pub struct DebuggerEngine {
     instrumenter: Instrumenter,
     paused: bool,
     instruction_debug_enabled: bool,
+    plugin_registry: Option<Arc<Mutex<PluginRegistry>>>,
+    event_context: EventContext,
 }
 
 impl DebuggerEngine {
@@ -36,6 +39,23 @@ impl DebuggerEngine {
             state: Arc::new(Mutex::new(DebugState::new())),
             stepper: Stepper::new(),
             instrumenter: Instrumenter::new(),
+            plugin_registry: None,
+            event_context: EventContext::new(),
+        }
+    }
+    
+    /// Set the plugin registry for this engine
+    pub fn set_plugin_registry(&mut self, registry: Arc<Mutex<PluginRegistry>>) {
+        self.plugin_registry = Some(registry);
+        info!("Plugin registry attached to debugger engine");
+    }
+    
+    /// Dispatch an event to all plugins
+    fn dispatch_event(&mut self, event: ExecutionEvent) {
+        if let Some(ref registry) = self.plugin_registry {
+            if let Ok(registry) = registry.lock() {
+                registry.dispatch_event(&event, &mut self.event_context);
+            }
             paused: false,
             instruction_debug_enabled: false,
         }
@@ -59,24 +79,53 @@ impl DebuggerEngine {
         Ok(())
     }
 
-    /// Disable instruction-level debugging.
-    pub fn disable_instruction_debug(&mut self) {
-        self.instrumenter.disable();
-        self.instrumenter.remove_hook();
+    /// // Dispatch before-execution event
+        self.dispatch_event(ExecutionEvent::BeforeFunctionCall {
+            function: function.to_string(),
+            args: args.map(str::to_string),
+        });
+
         if let Ok(mut state) = self.state.lock() {
-            state.disable_instruction_debug();
+            state.set_current_function(function.to_string(), args.map(str::to_string));
+            state.call_stack_mut().clear();
+            state.call_stack_mut().push(function.to_string(), None);
+            self.event_context.stack_depth = 1;
         }
-        self.instruction_debug_enabled = false;
-    }
 
-    /// Check if instruction-level debugging is enabled.
-    pub fn is_instruction_debug_enabled(&self) -> bool {
-        self.instruction_debug_enabled
-    }
+        if self.breakpoints.should_break(function) {
+            self.dispatch_event(ExecutionEvent::BreakpointHit {
+                function: function.to_string(),
+                condition: None,
+            });
+            self.pause_at_function(function);
+        }
 
-    /// Execute a contract function with debugging.
-    pub fn execute(&mut self, function: &str, args: Option<&str>) -> Result<String> {
-        info!("Executing function: {}", function);
+        let start_time = std::time::Instant::now();
+        let result = self.executor.execute(function, args);
+        let duration = start_time.elapsed();
+
+        // Dispatch after-execution event
+        let event_result = match &result {
+            Ok(value) => Ok(value.clone()),
+            Err(e) => Err(e.to_string()),
+        };
+        
+        self.dispatch_event(ExecutionEvent::AfterFunctionCall {
+            function: function.to_string(),
+            result: event_result,
+            duration,
+        });
+
+        self.update_call_stack(duration)?;
+
+        if let Err(ref e) = result {
+            println!("\n[ERROR] Execution failed: {}", e);
+            
+            self.dispatch_event(ExecutionEvent::Error {
+                message: e.to_string(),
+                context: Some(format!("Function: {}", function)),
+            });
+            
 
         if let Ok(mut state) = self.state.lock() {
             state.set_current_function(function.to_string(), args.map(str::to_string));
@@ -191,7 +240,11 @@ impl DebuggerEngine {
     }
 
     /// Step to next basic block.
-    pub fn step_block(&mut self) -> Result<bool> {
+    pub self.event_context.is_paused = false;
+        
+        self.dispatch_event(ExecutionEvent::ExecutionResumed);
+        
+        fn step_block(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
             return Err(anyhow::anyhow!("Instruction debugging not enabled"));
         }
@@ -200,6 +253,11 @@ impl DebuggerEngine {
             self.stepper.step_block(&mut state)
         } else {
             false
+        self.event_context.is_paused = true;
+
+        self.dispatch_event(ExecutionEvent::ExecutionPaused {
+            reason: format!("Breakpoint at function: {}", function),
+        });
         };
         self.paused = stepped;
         Ok(stepped)
