@@ -28,7 +28,7 @@ fn test_export_storage_creates_file() {
 fn test_import_storage_flag_accepted() {
     let temp_dir = TempDir::new().unwrap();
     let import_path = temp_dir.path().join("storage.json");
-    
+
     // Create a valid storage file
     let storage_content = r#"{"entries":{"key1":"value1"}}"#;
     fs::write(&import_path, storage_content).unwrap();
@@ -51,7 +51,7 @@ fn test_import_and_export_together() {
     let temp_dir = TempDir::new().unwrap();
     let import_path = temp_dir.path().join("import.json");
     let export_path = temp_dir.path().join("export.json");
-    
+
     // Create a valid storage file
     let storage_content = r#"{"entries":{"key1":"value1","key2":"value2"}}"#;
     fs::write(&import_path, storage_content).unwrap();

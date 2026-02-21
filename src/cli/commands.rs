@@ -192,7 +192,10 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         print_info(format!("Exporting storage to: {:?}", export_path));
         let storage_snapshot = engine.executor().get_storage_snapshot()?;
         crate::inspector::storage::StorageState::export_to_file(&storage_snapshot, export_path)?;
-        print_success(format!("Exported {} storage entries", storage_snapshot.len()));
+        print_success(format!(
+            "Exported {} storage entries",
+            storage_snapshot.len()
+        ));
     }
 
     let mut json_events = None;
