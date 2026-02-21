@@ -105,7 +105,7 @@ fn handle_deprecations(cli: &mut Cli) {
     }
 }
 
-fn main() -> Result<()> {
+fn main() -> miette::Result<()> {
     Formatter::configure_colors_from_env();
 
     let mut cli = Cli::parse();
@@ -139,14 +139,22 @@ fn main() -> Result<()> {
             generate(args.shell, &mut cmd, "soroban-debug", &mut io::stdout());
             Ok(())
         }
-        Some(Commands::Profile(args)) => {
-            soroban_debugger::cli::commands::profile(args)?;
-            Ok(())
-        }
+        Some(Commands::Profile(args)) => soroban_debugger::cli::commands::profile(args),
         Some(Commands::Symbolic(args)) => {
             soroban_debugger::cli::commands::symbolic(args, verbosity)
         }
         None => {
+            if let Some(path) = cli.list_functions {
+                return soroban_debugger::cli::commands::inspect(
+                    soroban_debugger::cli::args::InspectArgs {
+                        contract: path,
+                        wasm: None,
+                        functions: true,
+                        metadata: false,
+                    },
+                    verbosity,
+                );
+            }
             if cli.budget_trend {
                 soroban_debugger::cli::commands::show_budget_trend(
                     cli.trend_contract.as_deref(),
@@ -154,7 +162,7 @@ fn main() -> Result<()> {
                 )
             } else {
                 let mut cmd = Cli::command();
-                cmd.print_help()?;
+                cmd.print_help().map_err(|e| miette::miette!(e))?;
                 println!();
                 Ok(())
             }

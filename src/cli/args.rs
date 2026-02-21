@@ -53,6 +53,10 @@ pub struct Cli {
     /// Show detailed version information
     #[arg(long)]
     pub version_verbose: bool,
+
+    /// Show exported functions for a given contract (shorthand for inspect --functions)
+    #[arg(long)]
+    pub list_functions: Option<PathBuf>,
 }
 impl Cli {
     /// Get the effective verbosity level
@@ -194,9 +198,30 @@ pub struct RunArgs {
     /// Import storage state from JSON file before execution
     #[arg(long)]
     pub import_storage: Option<PathBuf>,
+
     /// Path to JSON file containing array of argument sets for batch execution
     #[arg(long)]
     pub batch_args: Option<PathBuf>,
+
+    /// Execution timeout in seconds (default: 30)
+    #[arg(long, default_value = "30")]
+    pub timeout: u64,
+
+    /// Trigger a prominent alert when a critical storage key is modified (repeatable)
+    #[arg(long, value_name = "KEY_PATTERN")]
+    pub alert_on_change: Vec<String>,
+
+    /// Expected SHA-256 hash of the WASM file
+    #[arg(long)]
+    pub expected_hash: Option<String>,
+
+    /// Show ledger entries accessed during execution
+    #[arg(long)]
+    pub show_ledger: bool,
+
+    /// TTL warning threshold in ledger sequence numbers (default: 1000)
+    #[arg(long, default_value = "1000")]
+    pub ttl_warning_threshold: u32,
 }
 
 impl RunArgs {
@@ -255,6 +280,12 @@ impl InteractiveArgs {
 }
 
 #[derive(Parser)]
+pub struct CompletionsArgs {
+    /// Shell to generate completion script for
+    #[arg(value_enum)]
+    pub shell: Shell,
+}
+#[derive(Parser)]
 pub struct InspectArgs {
     /// Path to the contract WASM file
     #[arg(short, long)]
@@ -271,6 +302,10 @@ pub struct InspectArgs {
     /// Show contract metadata
     #[arg(long)]
     pub metadata: bool,
+
+    /// Show cross-contract dependency graph in DOT and Mermaid formats
+    #[arg(long)]
+    pub dependency_graph: bool,
 }
 
 #[derive(Parser)]
@@ -344,13 +379,6 @@ pub struct CompareArgs {
     /// Output file for the comparison report (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-pub struct CompletionsArgs {
-    /// Shell to generate completion script for
-    #[arg(value_enum)]
-    pub shell: Shell,
 }
 
 /// Arguments for the TUI dashboard subcommand
