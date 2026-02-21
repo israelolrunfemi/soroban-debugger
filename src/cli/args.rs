@@ -160,6 +160,14 @@ pub struct RunArgs {
     /// Path to JSON file containing array of argument sets for batch execution
     #[arg(long)]
     pub batch_args: Option<PathBuf>,
+
+    /// Save execution results to file
+    #[arg(long)]
+    pub save_output: Option<PathBuf>,
+
+    /// Append to output file instead of overwriting
+    #[arg(long, requires = "save_output")]
+    pub append: bool,
 }
 
 impl RunArgs {
