@@ -74,6 +74,12 @@ impl DebuggerEngine {
         self.instruction_debug_enabled
     }
 
+    /// Execute a contract function with debugging
+    pub fn execute(
+        &mut self,
+        function: &str,
+        args: Option<&str>,
+    ) -> Result<crate::runtime::executor::ExecutionResult> {
     /// Execute a contract function with debugging.
     pub fn execute(&mut self, function: &str, args: Option<&str>) -> Result<String> {
         info!("Executing function: {}", function);
@@ -91,6 +97,44 @@ impl DebuggerEngine {
         let start_time = std::time::Instant::now();
         let result = self.executor.execute(function, args);
         let duration = start_time.elapsed();
+
+        // Capture final storage and generate test if enabled
+        if self.generate_test {
+            let storage_after =
+                crate::inspector::storage::StorageInspector::capture_snapshot(self.executor.host());
+            let output_str = match &result {
+                Ok(out) => out.result.clone(),
+                Err(e) => format!("Error: {}", e),
+            };
+
+            let arg_vec = if let Some(a) = args {
+                vec![a.to_string()]
+            } else {
+                vec![]
+            };
+
+            let codegen = crate::codegen::TestGenerator::new(
+                self.test_output_dir
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("tests/generated")),
+            );
+
+            // Paths handling
+            let contract_path = std::path::PathBuf::from("contract.wasm"); // This should be passed in ideally
+
+            if let Err(e) = codegen.generate_test(
+                &contract_path,
+                function,
+                arg_vec,
+                &output_str,
+                &storage_before,
+                &storage_after,
+            ) {
+                tracing::error!("Failed to generate test: {}", e);
+            } else {
+                tracing::info!("Test generated successfully in {:?}", self.test_output_dir);
+            }
+        }
 
         self.update_call_stack(duration)?;
 

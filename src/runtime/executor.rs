@@ -4,6 +4,7 @@ use crate::{DebuggerError, Result};
 use soroban_env_host::{DiagnosticLevel, Host};
 use soroban_sdk::{Address, Env, InvokeError, Symbol, Val, Vec as SorobanVec};
 use std::collections::HashMap;
+use std::time::Instant;
 use tracing::{info, warn};
 
 /// Storage snapshot for dry-run rollback.
@@ -12,6 +13,13 @@ pub struct StorageSnapshot {
     _contract_address: Address,
 }
 
+/// Storage snapshot for dry-run rollback.
+#[derive(Debug, Clone)]
+pub struct StorageSnapshot {
+    pub _contract_address: Address,
+}
+
+/// Executes Soroban contracts in a test environment
 /// Executes Soroban contracts in a test environment.
 pub struct ContractExecutor {
     env: Env,
@@ -58,6 +66,41 @@ impl ContractExecutor {
             &self.contract_address,
             &func_symbol,
             args_vec,
+        );
+
+        // End timing
+        let duration = start.elapsed();
+        let execution_time_ms = duration.as_secs_f64() * 1000.0;
+
+        match invoke_result {
+            Ok(Ok(val)) => {
+                info!(
+                    "Function executed successfully in {:.2}ms",
+                    execution_time_ms
+                );
+                Ok(ExecutionResult {
+                    result: format!("{:?}", val),
+                    execution_time_ms,
+                })
+            }
+            Ok(Err(conv_err)) => {
+                warn!("Return value conversion failed: {:?}", conv_err);
+                Ok(ExecutionResult {
+                    result: format!("Error (Conversion): {:?}", conv_err),
+                    execution_time_ms,
+                })
+            }
+            Err(Ok(inv_err)) => {
+                let err_msg = match inv_err {
+                    InvokeError::Contract(code) => format!("Contract error code: {}", code),
+                    InvokeError::Abort => "Contract execution aborted".to_string(),
+                };
+                warn!("{}", err_msg);
+                Ok(ExecutionResult {
+                    result: format!("Error: {}", err_msg),
+                    execution_time_ms,
+                })
+            }
         ) {
             Ok(Ok(val)) => Ok(format!("{:?}", val)),
             Ok(Err(conv_err)) => Err(DebuggerError::ExecutionError(format!(

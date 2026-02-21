@@ -26,6 +26,46 @@ fn print_warning(message: impl AsRef<str>) {
     println!("{}", Formatter::warning(message));
 }
 
+fn write_to_file(path: &Path, content: &str, append: bool) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(append)
+        .truncate(!append)
+        .open(path)
+        .with_context(|| format!("Failed to open file: {:?}", path))?;
+
+    file.write_all(content.as_bytes())
+        .with_context(|| format!("Failed to write to file: {:?}", path))?;
+
+    Ok(())
+}
+
+fn extract_error_code(error: &anyhow::Error) -> Option<u32> {
+    let error_str = format!("{:?}", error);
+    extract_error_code_from_string(&error_str)
+}
+
+fn extract_error_code_from_string(error_str: &str) -> Option<u32> {
+    if let Some(start) = error_str.find("error code: ") {
+        let code_str = &error_str[start + 12..];
+        if let Some(end) = code_str.find(|c: char| !c.is_ascii_digit()) {
+            code_str[..end].parse().ok()
+        } else {
+            code_str.parse().ok()
+        }
+    } else if let Some(start) = error_str.find("Contract error code: ") {
+        let code_str = &error_str[start + 23..];
+        if let Some(end) = code_str.find(|c: char| !c.is_ascii_digit()) {
+            code_str[..end].parse().ok()
+        } else {
+            code_str.parse().ok()
+        }
+    } else {
+        None
+    }
+}
+
 /// Execute batch mode with parallel execution
 fn run_batch(args: &RunArgs, batch_file: &std::path::Path) -> Result<()> {
     print_info(format!("Loading contract: {:?}", args.contract));
@@ -165,6 +205,10 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, args.breakpoint);
 
+    if args.generate_test {
+        engine.enable_test_generation(args.test_output_dir);
+    }
+
     if args.instruction_debug {
         print_info("Enabling instruction-level debugging...");
         engine.enable_instruction_debug(&wasm_bytes)?;
@@ -182,6 +226,61 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     }
 
     print_info("\n--- Execution Start ---\n");
+    memory_tracker.record_snapshot(engine.executor().host(), "before_execution");
+    instruction_counter.start_function(&args.function, engine.executor().host());
+
+    let mut error_db = crate::debugger::error_db::ErrorDatabase::new();
+    if let Some(spec_path) = &args.error_spec {
+        if let Err(e) = error_db.load_custom_errors_from_spec(&spec_path.to_string_lossy()) {
+            print_warning(format!("Failed to load error spec: {}", e));
+        }
+    }
+
+    let execution_result = engine.execute(&args.function, parsed_args.as_deref());
+
+    let mut error_code_for_json: Option<u32> = None;
+
+    // Check for errors in Result
+    if let Err(ref e) = execution_result {
+        if let Some(error_code) = extract_error_code(e) {
+            error_code_for_json = Some(error_code);
+            error_db.display_error(error_code);
+        }
+    }
+
+    let execution_result = execution_result?;
+    instruction_counter.end_function(engine.executor().host());
+
+    let result = execution_result.result.clone();
+
+    // Check for contract errors in ExecutionResult.result (contract errors are returned as Ok with error message)
+    if result.contains("Contract error code:") || result.contains("error code:") {
+        if let Some(error_code) = extract_error_code_from_string(&result) {
+            if error_code_for_json.is_none() {
+                error_code_for_json = Some(error_code);
+                error_db.display_error(error_code);
+            }
+        }
+    }
+
+    if let Ok(diagnostic_events) = engine.executor().get_diagnostic_events() {
+        let mut previous_memory = initial_memory;
+        for (idx, _event) in diagnostic_events.iter().enumerate() {
+            let current_memory =
+                crate::inspector::budget::BudgetInspector::get_cpu_usage(engine.executor().host())
+                    .memory_bytes;
+            if current_memory != previous_memory {
+                memory_tracker.record_memory_change(
+                    previous_memory,
+                    current_memory,
+                    &format!("diagnostic_event_{}", idx),
+                );
+                previous_memory = current_memory;
+            }
+        }
+    }
+
+    memory_tracker.record_snapshot(engine.executor().host(), "after_execution");
     let result = engine.execute(&args.function, parsed_args.as_deref())?;
     print_success("\n--- Execution Complete ---\n");
     print_success(format!("Result: {:?}", result));
@@ -280,6 +379,70 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
             output["auth"] = serde_json::to_value(auth_tree).unwrap_or(serde_json::Value::Null);
         }
 
+        let memory_json = serde_json::to_value(&memory_summary).unwrap_or(serde_json::Value::Null);
+        output["memory"] = memory_json;
+
+        let instruction_counts = instruction_counter.get_counts();
+        let instruction_json =
+            serde_json::to_value(instruction_counts).unwrap_or(serde_json::Value::Null);
+        output["instruction_counts"] = instruction_json;
+
+        if let Some(error_code) = error_code_for_json {
+            if let Some(explanation) = error_db.lookup(error_code) {
+                output["error_explanation"] =
+                    serde_json::to_value(explanation).unwrap_or(serde_json::Value::Null);
+            }
+        }
+
+        let content = serde_json::to_string_pretty(&output)?;
+        println!("{}", content);
+        content
+    } else {
+        let mut text_output = Vec::new();
+        text_output.push(format!("Result: {:?}", result));
+
+        let memory_text = format!(
+            "\n=== Memory Allocation Summary ===\nPeak Memory Usage: {} bytes\nAllocation Count: {}\nTotal Allocated Bytes: {} bytes\nInitial Memory: {} bytes\nFinal Memory: {} bytes\nMemory Delta: {} bytes",
+            memory_summary.peak_memory,
+            memory_summary.allocation_count,
+            memory_summary.total_allocated_bytes,
+            memory_summary.initial_memory,
+            memory_summary.final_memory,
+            memory_summary.final_memory.saturating_sub(memory_summary.initial_memory)
+        );
+        text_output.push(memory_text);
+
+        if let Some(events) = json_events {
+            text_output.push("\n--- Events ---".to_string());
+            for (i, event) in events.iter().enumerate() {
+                text_output.push(format!("Event #{}:", i));
+                text_output.push(format!(
+                    "  Contract: {}",
+                    event.contract_id.as_deref().unwrap_or("<none>")
+                ));
+                text_output.push(format!("  Topics: {:?}", event.topics));
+                text_output.push(format!("  Data: {}", event.data));
+            }
+        }
+
+        if let Some(auth_tree) = json_auth {
+            text_output.push("\n--- Authorizations ---".to_string());
+            let auth_json = serde_json::to_string_pretty(&auth_tree)
+                .unwrap_or_else(|_| "Failed to serialize auth tree".to_string());
+            text_output.push(auth_json);
+        }
+
+        text_output.join("\n")
+    };
+
+    if let Some(output_path) = &args.save_output {
+        write_to_file(output_path, &output_content, args.append)?;
+        let mode = if args.append {
+            "appended to"
+        } else {
+            "written to"
+        };
+        print_success(format!("Results {}: {:?}", mode, output_path));
         println!("{}", serde_json::to_string_pretty(&output)?);
     }
 
@@ -308,13 +471,13 @@ fn run_dry_run(args: &RunArgs) -> Result<()> {
         print_info(format!("[DRY RUN] {}", loaded_snapshot.format_summary()));
     }
 
-    let parsed_args = if let Some(args_json) = &args.args {
+    let _parsed_args = if let Some(args_json) = &args.args {
         Some(parse_args(args_json)?)
     } else {
         None
     };
 
-    let initial_storage = if let Some(storage_json) = &args.storage {
+    let _initial_storage = if let Some(storage_json) = &args.storage {
         Some(parse_storage(storage_json)?)
     } else {
         None
