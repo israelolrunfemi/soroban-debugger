@@ -155,6 +155,11 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         executor.set_initial_storage(storage)?;
     }
 
+    let host = executor.host();
+    let initial_memory =
+        crate::inspector::budget::BudgetInspector::get_cpu_usage(host).memory_bytes;
+    let mut memory_tracker = crate::inspector::budget::MemoryTracker::new(initial_memory);
+
     let mut engine = DebuggerEngine::new(executor, args.breakpoint);
 
     if args.instruction_debug {
@@ -174,10 +179,33 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
     }
 
     print_info("\n--- Execution Start ---\n");
+    memory_tracker.record_snapshot(engine.executor().host(), "before_execution");
     let result = engine.execute(&args.function, parsed_args.as_deref())?;
+
+    if let Ok(diagnostic_events) = engine.executor().get_diagnostic_events() {
+        let mut previous_memory = initial_memory;
+        for (idx, _event) in diagnostic_events.iter().enumerate() {
+            let current_memory =
+                crate::inspector::budget::BudgetInspector::get_cpu_usage(engine.executor().host())
+                    .memory_bytes;
+            if current_memory != previous_memory {
+                memory_tracker.record_memory_change(
+                    previous_memory,
+                    current_memory,
+                    &format!("diagnostic_event_{}", idx),
+                );
+                previous_memory = current_memory;
+            }
+        }
+    }
+
+    memory_tracker.record_snapshot(engine.executor().host(), "after_execution");
     print_success("\n--- Execution Complete ---\n");
     print_success(format!("Result: {:?}", result));
     logging::log_execution_complete(&result);
+
+    let memory_summary = memory_tracker.finalize(engine.executor().host());
+    memory_summary.display();
 
     let mut json_events = None;
     if args.show_events {
@@ -260,6 +288,9 @@ pub fn run(args: RunArgs, _verbosity: Verbosity) -> Result<()> {
         if let Some(auth_tree) = json_auth {
             output["auth"] = serde_json::to_value(auth_tree).unwrap_or(serde_json::Value::Null);
         }
+
+        let memory_json = serde_json::to_value(&memory_summary).unwrap_or(serde_json::Value::Null);
+        output["memory"] = memory_json;
 
         println!("{}", serde_json::to_string_pretty(&output)?);
     }

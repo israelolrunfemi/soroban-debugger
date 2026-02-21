@@ -5,6 +5,6 @@ pub mod stack;
 pub mod storage;
 
 pub use auth::AuthInspector;
-pub use budget::{BudgetInfo, BudgetInspector};
+pub use budget::{BudgetInfo, BudgetInspector, MemorySummary, MemoryTracker};
 pub use stack::CallStackInspector;
 pub use storage::{StorageFilter, StorageInspector};
