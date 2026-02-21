@@ -1,5 +1,5 @@
 use crate::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use wasmparser::{Parser, Payload};
 
 // ─── existing public API (unchanged) ─────────────────────────────────────────
@@ -23,22 +23,116 @@ pub fn parse_functions(wasm_bytes: &[u8]) -> Result<Vec<String>> {
     Ok(functions)
 }
 
-/// Get high-level module statistics from a WASM binary.
+/// Get high-level module statistics and section breakdown from a WASM binary.
 pub fn get_module_info(wasm_bytes: &[u8]) -> Result<ModuleInfo> {
     let mut info = ModuleInfo::default();
+    info.total_size = wasm_bytes.len();
     let parser = Parser::new(0);
 
     for payload in parser.parse_all(wasm_bytes) {
-        match payload? {
+        let payload = payload?;
+        match &payload {
             Payload::Version { .. } => {}
             Payload::TypeSection(reader) => {
                 info.type_count = reader.count();
+                info.sections.push(WasmSection {
+                    name: "Type".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::ImportSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Import".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
             }
             Payload::FunctionSection(reader) => {
                 info.function_count = reader.count();
+                info.sections.push(WasmSection {
+                    name: "Function".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::TableSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Table".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::MemorySection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Memory".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::GlobalSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Global".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
             }
             Payload::ExportSection(reader) => {
                 info.export_count = reader.count();
+                info.sections.push(WasmSection {
+                    name: "Export".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::StartSection { range, .. } => {
+                info.sections.push(WasmSection {
+                    name: "Start".to_string(),
+                    size: range.end - range.start,
+                    offset: range.start,
+                });
+            }
+            Payload::ElementSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Element".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::CodeSectionStart { range, .. } => {
+                info.sections.push(WasmSection {
+                    name: "Code".to_string(),
+                    size: range.end - range.start,
+                    offset: range.start,
+                });
+            }
+            Payload::CodeSectionEntry(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Code (Entry)".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::DataSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: "Data".to_string(),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
+            }
+            Payload::DataCountSection { range, .. } => {
+                info.sections.push(WasmSection {
+                    name: "Data Count".to_string(),
+                    size: range.end - range.start,
+                    offset: range.start,
+                });
+            }
+            Payload::CustomSection(reader) => {
+                info.sections.push(WasmSection {
+                    name: format!("Custom ({})", reader.name()),
+                    size: reader.range().end - reader.range().start,
+                    offset: reader.range().start,
+                });
             }
             _ => {}
         }
@@ -48,11 +142,21 @@ pub fn get_module_info(wasm_bytes: &[u8]) -> Result<ModuleInfo> {
 }
 
 /// Information about a WASM module.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct ModuleInfo {
+    pub total_size: usize,
     pub type_count: u32,
     pub function_count: u32,
     pub export_count: u32,
+    pub sections: Vec<WasmSection>,
+}
+
+/// Represents a single section within a WASM binary.
+#[derive(Debug, Serialize, Clone)]
+pub struct WasmSection {
+    pub name: String,
+    pub size: usize,
+    pub offset: usize,
 }
 
 // ─── metadata types ───────────────────────────────────────────────────────────
@@ -494,7 +598,18 @@ implementation_notes=Line-based format
         assert!(meta.is_empty());
     }
 
-    // ── ContractMetadata::is_empty ────────────────────────────────────────────
+    #[test]
+    fn test_get_module_info_with_sections() {
+        let wasm = make_custom_section_wasm("test_section", &[0x01, 0x02, 0x03]);
+        let info = get_module_info(&wasm).expect("should parse");
+        
+        assert_eq!(info.total_size, wasm.len());
+        // Should have at least the custom section
+        assert!(!info.sections.is_empty());
+        let custom_section = info.sections.iter().find(|s| s.name.contains("test_section"));
+        assert!(custom_section.is_some());
+        assert_eq!(custom_section.unwrap().size, 12 + 3); // name len (1) + name (12) + data (3) - wait, name "test_section" is 12 chars
+    }
 
     #[test]
     fn contract_metadata_is_empty_when_default() {

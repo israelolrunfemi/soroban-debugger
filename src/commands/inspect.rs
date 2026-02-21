@@ -10,6 +10,8 @@ use crate::{
     },
     InspectArgs, Result,
 };
+use colored::Colorize;
+use serde::Serialize;
 
 const BAR_WIDTH: usize = 54;
 
@@ -24,7 +26,38 @@ pub fn run(args: &InspectArgs) -> Result<()> {
         )
     })?;
 
-    print_report(&args.contract, &wasm_bytes)
+    if args.json {
+        print_json_report(&args.contract, &wasm_bytes)
+    } else {
+        println!();
+        print_report(&args.contract, &wasm_bytes)
+    }
+}
+
+#[derive(Serialize)]
+struct FullReport {
+    file: String,
+    size_bytes: usize,
+    module_info: crate::utils::wasm::ModuleInfo,
+    functions: Vec<String>,
+    metadata: crate::utils::wasm::ContractMetadata,
+}
+
+fn print_json_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
+    let info = get_module_info(wasm_bytes)?;
+    let functions = parse_functions(wasm_bytes)?;
+    let metadata = extract_contract_metadata(wasm_bytes)?;
+
+    let report = FullReport {
+        file: path.display().to_string(),
+        size_bytes: wasm_bytes.len(),
+        module_info: info,
+        functions,
+        metadata,
+    };
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
 }
 
 // ─── report ───────────────────────────────────────────────────────────────────
@@ -42,18 +75,47 @@ fn print_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
 
     // ── header ────────────────────────────────────────────────────────────────
     println!("{heavy}");
-    println!("  Soroban Contract Inspector");
+    println!("  {}", "Soroban Contract Inspector".bold().cyan());
     println!("{heavy}");
     println!();
-    println!("  File : {}", path.display());
-    println!("  Size : {} bytes", wasm_bytes.len());
+    println!("  File : {}", path.display().to_string().bright_white());
+    println!("  Size : {} ({:.2} KB)", 
+        format!("{} bytes", wasm_bytes.len()).bright_white(),
+        wasm_bytes.len() as f64 / 1024.0
+    );
     println!();
 
     // ── module stats ──────────────────────────────────────────────────────────
-    section_header("Module");
-    println!("  Types      : {}", info.type_count);
-    println!("  Functions  : {}", info.function_count);
-    println!("  Exports    : {}", info.export_count);
+    section_header("Module Statistics");
+    println!("  Types      : {}", info.type_count.to_string().bright_white());
+    println!("  Functions  : {}", info.function_count.to_string().bright_white());
+    println!("  Exports    : {}", info.export_count.to_string().bright_white());
+    println!();
+
+    // ── section breakdown ─────────────────────────────────────────────────────
+    section_header("WASM Section Breakdown");
+    println!("  {:<20} | {:>10} | {:>6}", "Section", "Size", "Total%");
+    println!("  {}|{}|{}", "─".repeat(21), "─".repeat(12), "─".repeat(8));
+
+    for section in &info.sections {
+        let percentage = (section.size as f64 / info.total_size as f64) * 100.0;
+        let size_str = format!("{} B", section.size);
+        
+        let row = format!("  {:<20} | {:>10} | {:>5.1}%", 
+            section.name, 
+            size_str,
+            percentage
+        );
+
+        // Highlight sections over 50KB or more than 50% of total
+        if section.size > 50 * 1024 || percentage > 50.0 {
+            println!("{}", row.red().bold());
+        } else if section.size > 10 * 1024 {
+            println!("{}", row.yellow());
+        } else {
+            println!("{}", row.bright_white());
+        }
+    }
     println!();
 
     // ── function signatures ───────────────────────────────────────────────────

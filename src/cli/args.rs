@@ -267,6 +267,10 @@ pub struct InspectArgs {
     /// Show contract metadata
     #[arg(long)]
     pub metadata: bool,
+
+    /// Output format as JSON
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Args for the `list-functions` shorthand command.
