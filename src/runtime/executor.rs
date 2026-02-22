@@ -97,7 +97,10 @@ impl ContractExecutor {
             .map(|v| ScVal::try_from_val(self.env.host(), v))
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| {
-                DebuggerError::ExecutionError(format!("Failed to convert arguments to ScVal: {:?}", e))
+                DebuggerError::ExecutionError(format!(
+                    "Failed to convert arguments to ScVal: {:?}",
+                    e
+                ))
             })?;
 
         let (tx, rx) = std::sync::mpsc::channel();

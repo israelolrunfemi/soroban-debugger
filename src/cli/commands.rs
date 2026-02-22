@@ -234,7 +234,10 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             print_info(format!("\nGenerating unit test: {:?}", test_path));
             let test_code = crate::codegen::TestGenerator::generate(record, &args.contract)?;
             crate::codegen::TestGenerator::write_to_file(test_path, &test_code, args.overwrite)?;
-            print_success(format!("Unit test generated successfully at {:?}", test_path));
+            print_success(format!(
+                "Unit test generated successfully at {:?}",
+                test_path
+            ));
         } else {
             print_warning("No execution record found to generate test.");
         }
@@ -1267,12 +1270,16 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
         let cpu_diff =
             replayed_budget.cpu_instructions as i64 - original_budget.cpu_instructions as i64;
 
-        if cpu_diff == 0 {
-            print_success("  CPU usage matches exactly ✓");
-        } else if cpu_diff > 0 {
-            print_warning(format!("  CPU increased by {} instructions", cpu_diff));
-        } else {
-            print_success(format!("  CPU decreased by {} instructions", -cpu_diff));
+        match cpu_diff.cmp(&0) {
+            std::cmp::Ordering::Equal => {
+                print_success("  CPU usage matches exactly ✓");
+            }
+            std::cmp::Ordering::Greater => {
+                print_warning(format!("  CPU increased by {} instructions", cpu_diff));
+            }
+            std::cmp::Ordering::Less => {
+                print_success(format!("  CPU decreased by {} instructions", -cpu_diff));
+            }
         }
 
         print_info(format!(
@@ -1286,12 +1293,16 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 
         let mem_diff = replayed_budget.memory_bytes as i64 - original_budget.memory_bytes as i64;
 
-        if mem_diff == 0 {
-            print_success("  Memory usage matches exactly ✓");
-        } else if mem_diff > 0 {
-            print_warning(format!("  Memory increased by {} bytes", mem_diff));
-        } else {
-            print_success(format!("  Memory decreased by {} bytes", -mem_diff));
+        match mem_diff.cmp(&0) {
+            std::cmp::Ordering::Equal => {
+                print_success("  Memory usage matches exactly ✓");
+            }
+            std::cmp::Ordering::Greater => {
+                print_warning(format!("  Memory increased by {} bytes", mem_diff));
+            }
+            std::cmp::Ordering::Less => {
+                print_success(format!("  Memory decreased by {} bytes", -mem_diff));
+            }
         }
     }
 

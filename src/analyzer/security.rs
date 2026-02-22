@@ -102,8 +102,8 @@ impl SecurityRule for HardcodedAddressRule {
         // Simple heuristic: look for G... or C... strings of appropriate length
         // This is a basic implementation.
         let parser = Parser::new(0);
-        for payload in parser.parse_all(wasm_bytes) {
-            if let Ok(Payload::DataSection(reader)) = payload {
+        for payload in parser.parse_all(wasm_bytes).flatten() {
+            if let Payload::DataSection(reader) = payload {
                 for data in reader.into_iter().flatten() {
                     let content = String::from_utf8_lossy(data.data);
                     // Check for Stellar address patterns (G... or C...)

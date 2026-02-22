@@ -1,8 +1,8 @@
 use crate::runtime::executor::ExecutionRecord;
+use crate::{DebuggerError, Result};
 use soroban_env_host::xdr::{Limits, WriteXdr};
 use std::fs;
 use std::path::Path;
-use crate::{Result, DebuggerError};
 
 /// Template engine for generating Soroban unit tests.
 pub struct TestGenerator;
@@ -18,20 +18,29 @@ impl TestGenerator {
         // Test signature
         code.push_str("#[test]\n");
         code.push_str(&format!("fn test_{}_reproduction() {{\n", record.function));
-        
+
         // Environment setup
         code.push_str("    let env = Env::default();\n");
-        
+
         // Contract registration
         // We assume the WASM path is relevant to where the test is run.
         // For simplicity, we use the filename and assume it's in the same directory or project root.
-        let wasm_file_name = wasm_path.file_name()
+        let wasm_file_name = wasm_path
+            .file_name()
             .map(|f| f.to_string_lossy().to_string())
             .unwrap_or_else(|| "contract.wasm".to_string());
-        
-        code.push_str(&format!("    // Register contract (assuming {} is in current or parent directory)\n", wasm_file_name));
-        code.push_str("    // You may need to adjust this path depending on your project structure.\n");
-        code.push_str(&format!("    let wasm = include_bytes!(\"{}\");\n", wasm_file_name));
+
+        code.push_str(&format!(
+            "    // Register contract (assuming {} is in current or parent directory)\n",
+            wasm_file_name
+        ));
+        code.push_str(
+            "    // You may need to adjust this path depending on your project structure.\n",
+        );
+        code.push_str(&format!(
+            "    let wasm = include_bytes!(\"{}\");\n",
+            wasm_file_name
+        ));
         code.push_str("    let contract_id = env.register_contract_wasm(None, wasm);\n\n");
 
         // Prepare arguments
@@ -46,13 +55,10 @@ impl TestGenerator {
                 base64
             ));
         }
-        code.push_str("\n");
+        code.push('\n');
 
         // Invocation
-        code.push_str(&format!(
-            "    // Invoke {}\n",
-            record.function
-        ));
+        code.push_str(&format!("    // Invoke {}\n", record.function));
         code.push_str(&format!(
             "    let result = env.invoke_contract::<Val>(&contract_id, &Symbol::new(&env, \"{}\"), args);\n\n",
             record.function
@@ -63,7 +69,10 @@ impl TestGenerator {
         match &record.result {
             Ok(val) => {
                 let base64 = val.to_xdr_base64(Limits::none()).map_err(|e| {
-                    DebuggerError::ExecutionError(format!("Failed to encode result to XDR: {:?}", e))
+                    DebuggerError::ExecutionError(format!(
+                        "Failed to encode result to XDR: {:?}",
+                        e
+                    ))
                 })?;
                 code.push_str(&format!(
                     "    let expected = Val::try_from_val(&env, &ScVal::from_xdr_base64(\"{}\").unwrap()).unwrap();\n",
@@ -92,7 +101,8 @@ impl TestGenerator {
     /// Write the generated test to a file, either overwriting or appending.
     pub fn write_to_file(path: &Path, content: &str, overwrite: bool) -> Result<()> {
         if path.exists() && !overwrite {
-            let mut existing = fs::read_to_string(path).map_err(|e| DebuggerError::FileError(e.to_string()))?;
+            let mut existing =
+                fs::read_to_string(path).map_err(|e| DebuggerError::FileError(e.to_string()))?;
             if !existing.trim().is_empty() {
                 existing.push_str("\n\n");
             }
@@ -112,8 +122,8 @@ impl TestGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use soroban_env_host::xdr::ScVal;
+    use std::collections::HashMap;
     use tempfile::tempdir;
 
     #[test]
@@ -138,10 +148,10 @@ mod tests {
     fn test_write_overwrite() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test_gen.rs");
-        
+
         TestGenerator::write_to_file(&file_path, "test1", true).unwrap();
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "test1");
-        
+
         TestGenerator::write_to_file(&file_path, "test2", true).unwrap();
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "test2");
     }
@@ -150,10 +160,10 @@ mod tests {
     fn test_write_append() {
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("test_gen.rs");
-        
+
         TestGenerator::write_to_file(&file_path, "test1", false).unwrap();
         assert_eq!(fs::read_to_string(&file_path).unwrap(), "test1");
-        
+
         TestGenerator::write_to_file(&file_path, "test2", false).unwrap();
         let content = fs::read_to_string(&file_path).unwrap();
         assert!(content.contains("test1"));
