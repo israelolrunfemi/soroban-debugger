@@ -174,6 +174,9 @@ pub enum Commands {
     /// Run a multi-step scenario from a TOML file
     Scenario(ScenarioArgs),
 
+    /// Report runtime health and diagnostics for troubleshooting
+    Doctor(DoctorArgs),
+
     /// Plugin-provided subcommand (loaded at runtime)
     #[command(external_subcommand)]
     External(Vec<String>),
@@ -864,4 +867,28 @@ pub struct ScenarioArgs {
     /// Initial storage state as JSON object
     #[arg(long)]
     pub storage: Option<String>,
+}
+
+/// Arguments for the doctor/health command
+#[derive(Parser)]
+pub struct DoctorArgs {
+    /// Output format (pretty, json)
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: OutputFormat,
+
+    /// Optional remote debug server to probe (e.g., localhost:9229)
+    #[arg(long)]
+    pub remote: Option<String>,
+
+    /// Authentication token for remote probe (if required by server)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Timeout for remote checks in milliseconds
+    #[arg(long, default_value = "3000")]
+    pub timeout_ms: u64,
+
+    /// Optional path to a VS Code extension `package.json` to report version hints
+    #[arg(long, value_name = "FILE")]
+    pub vscode_manifest: Option<PathBuf>,
 }

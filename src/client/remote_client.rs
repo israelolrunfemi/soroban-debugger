@@ -3,7 +3,7 @@ use crate::server::protocol::{
 };
 use crate::{DebuggerError, Result};
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
+use std::net::{TcpStream, ToSocketAddrs};
 use tracing::info;
 
 /// Remote client for connecting to a debug server
@@ -11,6 +11,7 @@ pub struct RemoteClient {
     stream: BufReader<TcpStream>,
     message_id: u64,
     authenticated: bool,
+    selected_protocol_version: Option<u32>,
 }
 
 impl RemoteClient {
@@ -25,6 +26,7 @@ impl RemoteClient {
             stream: BufReader::new(stream),
             message_id: 0,
             authenticated: token.is_none(),
+            selected_protocol_version: None,
         };
 
         client.handshake("rust-remote-client", env!("CARGO_PKG_VERSION"))?;
@@ -35,6 +37,67 @@ impl RemoteClient {
         }
 
         Ok(client)
+    }
+
+    /// Connect with deterministic connect + IO timeouts to avoid hanging on half-open connections.
+    pub fn connect_with_timeout(
+        addr: &str,
+        token: Option<String>,
+        timeout: std::time::Duration,
+    ) -> Result<Self> {
+        info!(
+            "Connecting to debug server at {} (timeout {:?})",
+            addr, timeout
+        );
+
+        let mut last_err: Option<DebuggerError> = None;
+        let addrs = addr.to_socket_addrs().map_err(|e| {
+            DebuggerError::NetworkError(format!("Failed to resolve {}: {}", addr, e))
+        })?;
+
+        for socket_addr in addrs {
+            match TcpStream::connect_timeout(&socket_addr, timeout) {
+                Ok(stream) => {
+                    stream.set_read_timeout(Some(timeout)).map_err(|e| {
+                        DebuggerError::NetworkError(format!("Failed to set read timeout: {}", e))
+                    })?;
+                    stream.set_write_timeout(Some(timeout)).map_err(|e| {
+                        DebuggerError::NetworkError(format!("Failed to set write timeout: {}", e))
+                    })?;
+
+                    let mut client = Self {
+                        stream: BufReader::new(stream),
+                        message_id: 0,
+                        authenticated: token.is_none(),
+                        selected_protocol_version: None,
+                    };
+
+                    client.handshake("rust-remote-client", env!("CARGO_PKG_VERSION"))?;
+
+                    if let Some(token) = token {
+                        client.authenticate(&token)?;
+                    }
+
+                    return Ok(client);
+                }
+                Err(e) => {
+                    last_err = Some(DebuggerError::NetworkError(format!(
+                        "Failed to connect to {}: {}",
+                        socket_addr, e
+                    )));
+                }
+            }
+        }
+
+        Err(last_err
+            .unwrap_or_else(|| {
+                DebuggerError::NetworkError(format!("Failed to connect to {}", addr))
+            })
+            .into())
+    }
+
+    pub fn selected_protocol_version(&self) -> Option<u32> {
+        self.selected_protocol_version
     }
 
     /// Perform a protocol handshake and verify compatibility.
@@ -49,7 +112,10 @@ impl RemoteClient {
         match response {
             DebugResponse::HandshakeAck {
                 selected_version, ..
-            } => Ok(selected_version),
+            } => {
+                self.selected_protocol_version = Some(selected_version);
+                Ok(selected_version)
+            }
             DebugResponse::IncompatibleProtocol { message, .. } => {
                 Err(DebuggerError::ExecutionError(format!(
                     "Incompatible debugger protocol: {}",

@@ -1,8 +1,8 @@
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
 use crate::analyzer::{security::SecurityAnalyzer, symbolic::SymbolicAnalyzer};
 use crate::cli::args::{
-    AnalyzeArgs, CompareArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs, RemoteArgs,
-    ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, TuiArgs,
+    AnalyzeArgs, CompareArgs, DoctorArgs, InspectArgs, InteractiveArgs, OptimizeArgs, ProfileArgs,
+    RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs, TuiArgs,
     UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
@@ -20,6 +20,7 @@ use crate::ui::{run_dashboard, DebuggerUI};
 use crate::{DebuggerError, Result};
 use miette::WrapErr;
 use std::fs;
+use std::path::PathBuf;
 
 fn print_info(message: impl AsRef<str>) {
     if !Formatter::is_quiet() {
@@ -1803,6 +1804,167 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
     Ok(())
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorCheck {
+    ok: bool,
+    message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct RemoteDoctorReport {
+    address: String,
+    connect: DoctorCheck,
+    handshake: Option<DoctorCheck>,
+    ping: Option<DoctorCheck>,
+    auth: Option<DoctorCheck>,
+    selected_protocol: Option<u32>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct DoctorReport {
+    binary: serde_json::Value,
+    config: serde_json::Value,
+    history: serde_json::Value,
+    plugins: serde_json::Value,
+    protocol: serde_json::Value,
+    remote: Option<RemoteDoctorReport>,
+    vscode_extension: serde_json::Value,
+}
+
+fn json_kv(key: &str, value: impl serde::Serialize) -> serde_json::Value {
+    serde_json::json!({ key: value })[key].clone()
+}
+
+fn check_ok(message: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        ok: true,
+        message: message.into(),
+    }
+}
+
+fn check_err(message: impl Into<String>) -> DoctorCheck {
+    DoctorCheck {
+        ok: false,
+        message: message.into(),
+    }
+}
+
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+}
+
+fn read_repo_vscode_extension_version(manifest_path: Option<&PathBuf>) -> Option<String> {
+    let path = manifest_path.cloned().unwrap_or_else(|| {
+        PathBuf::from("extensions")
+            .join("vscode")
+            .join("package.json")
+    });
+    let text = std::fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    v.get("version")?.as_str().map(|s| s.to_string())
+}
+
+fn compute_default_history_path() -> Result<PathBuf> {
+    if let Ok(path) = std::env::var("SOROBAN_DEBUG_HISTORY_FILE") {
+        return Ok(PathBuf::from(path));
+    }
+
+    let home_dir = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|_| DebuggerError::FileError("Could not determine home directory".to_string()))?;
+    Ok(PathBuf::from(home_dir)
+        .join(".soroban-debug")
+        .join("history.json"))
+}
+
+fn history_file_status(path: &PathBuf) -> serde_json::Value {
+    let exists = path.exists();
+    let metadata = std::fs::metadata(path).ok();
+    let size = metadata.as_ref().map(|m| m.len());
+
+    let readable = std::fs::File::open(path).is_ok();
+    let writable = std::fs::OpenOptions::new()
+        .write(true)
+        .append(true)
+        .open(path)
+        .is_ok();
+
+    serde_json::json!({
+        "path": path,
+        "exists": exists,
+        "size_bytes": size,
+        "readable": readable || !exists,
+        "writable": writable || !exists,
+    })
+}
+
+fn config_status() -> serde_json::Value {
+    let path = std::path::Path::new(crate::config::DEFAULT_CONFIG_FILE).to_path_buf();
+    let exists = path.exists();
+    let load = crate::config::Config::load();
+    let parse_ok = load.is_ok() || !exists;
+    let error = load.err().map(|e| e.to_string());
+
+    serde_json::json!({
+        "path": path,
+        "exists": exists,
+        "parse_ok": parse_ok,
+        "error": error,
+    })
+}
+
+fn plugin_status() -> serde_json::Value {
+    let disabled = env_truthy("SOROBAN_DEBUG_NO_PLUGINS");
+    let plugin_dir = crate::plugin::PluginLoader::default_plugin_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+
+    let discovered = crate::plugin::PluginLoader::default_plugin_dir()
+        .map(|dir| crate::plugin::PluginLoader::new(dir).discover_plugins())
+        .unwrap_or_default();
+
+    let registry = crate::plugin::registry::init_global_plugin_registry();
+    let stats = registry.read().map(|r| r.statistics()).unwrap_or_default();
+
+    serde_json::json!({
+        "disabled_via_env": disabled,
+        "plugin_dir": plugin_dir,
+        "discovered_manifests": discovered.len(),
+        "loaded_plugins": stats.total,
+        "provides_commands": stats.provides_commands,
+        "provides_formatters": stats.provides_formatters,
+        "supports_hot_reload": stats.supports_hot_reload,
+    })
+}
+
+fn protocol_status() -> serde_json::Value {
+    serde_json::json!({
+        "min": crate::server::protocol::PROTOCOL_MIN_VERSION,
+        "max": crate::server::protocol::PROTOCOL_MAX_VERSION,
+        "current": crate::server::protocol::PROTOCOL_VERSION,
+    })
+}
+
+fn binary_status() -> serde_json::Value {
+    serde_json::json!({
+        "name": env!("CARGO_PKG_NAME"),
+        "version": env!("CARGO_PKG_VERSION"),
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+    })
+}
+
+fn vscode_extension_status(vscode_manifest: Option<&PathBuf>) -> serde_json::Value {
+    let version = read_repo_vscode_extension_version(vscode_manifest);
+    serde_json::json!({
+        "version_hint": version,
+        "wire_protocol_expected_min": crate::server::protocol::PROTOCOL_MIN_VERSION,
+        "wire_protocol_expected_max": crate::server::protocol::PROTOCOL_MAX_VERSION,
+    })
+}
+
 /// Run a scenario
 pub fn scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
     crate::scenario::run_scenario(args, _verbosity)
@@ -1898,6 +2060,299 @@ pub fn show_budget_trend(contract: Option<&str>, function: Option<&str>) -> Resu
     Ok(())
 }
 
+pub fn doctor(args: DoctorArgs) -> Result<()> {
+    let history_path = compute_default_history_path()?;
+
+    let mut report = DoctorReport {
+        binary: binary_status(),
+        config: config_status(),
+        history: history_file_status(&history_path),
+        plugins: plugin_status(),
+        protocol: protocol_status(),
+        remote: None,
+        vscode_extension: vscode_extension_status(args.vscode_manifest.as_ref()),
+    };
+
+    if let Some(addr) = &args.remote {
+        report.remote = Some(run_remote_doctor_probe(
+            addr,
+            args.token.as_deref(),
+            std::time::Duration::from_millis(args.timeout_ms),
+        ));
+    }
+
+    match args.format {
+        crate::cli::args::OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&report).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to serialize doctor report: {}", e))
+                })?
+            );
+        }
+        crate::cli::args::OutputFormat::Pretty => {
+            print_doctor_pretty(&report);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_remote_doctor_probe(
+    addr: &str,
+    token: Option<&str>,
+    timeout: std::time::Duration,
+) -> RemoteDoctorReport {
+    let mut out = RemoteDoctorReport {
+        address: addr.to_string(),
+        connect: check_ok("not attempted"),
+        handshake: None,
+        ping: None,
+        auth: None,
+        selected_protocol: None,
+    };
+
+    match crate::client::RemoteClient::connect_with_timeout(
+        addr,
+        token.map(|t| t.to_string()),
+        timeout,
+    ) {
+        Ok(mut client) => {
+            out.connect = check_ok("connected");
+
+            // Ping is a lightweight sanity check after handshake/auth.
+            match client.ping() {
+                Ok(()) => out.ping = Some(check_ok("pong")),
+                Err(e) => out.ping = Some(check_err(format!("{e}"))),
+            }
+
+            // If connect succeeded, handshake was already attempted; treat this as OK.
+            out.handshake = Some(check_ok("negotiated"));
+            out.selected_protocol = client.selected_protocol_version();
+
+            if token.is_some() {
+                // connect_with_timeout already authenticated; mark as ok.
+                out.auth = Some(check_ok("authenticated"));
+            }
+        }
+        Err(e) => {
+            out.connect = check_err(e.to_string());
+        }
+    }
+
+    out
+}
+
+fn print_doctor_pretty(report: &DoctorReport) {
+    let headline = format!(
+        "soroban-debug doctor (v{})",
+        report
+            .binary
+            .get("version")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+    );
+    if !Formatter::is_quiet() {
+        println!("{}", Formatter::info(headline));
+
+        println!("\nBinary");
+        println!(
+            "  name: {}",
+            report
+                .binary
+                .get("name")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  version: {}",
+            report
+                .binary
+                .get("version")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  os: {}",
+            report.binary.get("os").unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  arch: {}",
+            report
+                .binary
+                .get("arch")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+
+        println!("\nConfig");
+        println!(
+            "  path: {}",
+            report
+                .config
+                .get("path")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  exists: {}",
+            report
+                .config
+                .get("exists")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  parse_ok: {}",
+            report
+                .config
+                .get("parse_ok")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        if let Some(err) = report.config.get("error").and_then(|v| v.as_str()) {
+            println!("  error: {}", Formatter::warning(err));
+        }
+
+        println!("\nHistory");
+        println!(
+            "  path: {}",
+            report
+                .history
+                .get("path")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  exists: {}",
+            report
+                .history
+                .get("exists")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        if let Some(size) = report.history.get("size_bytes") {
+            if !size.is_null() {
+                println!("  size_bytes: {}", size);
+            }
+        }
+        println!(
+            "  readable: {}",
+            report
+                .history
+                .get("readable")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  writable: {}",
+            report
+                .history
+                .get("writable")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+
+        println!("\nPlugins");
+        println!(
+            "  disabled_via_env: {}",
+            report
+                .plugins
+                .get("disabled_via_env")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  plugin_dir: {}",
+            report
+                .plugins
+                .get("plugin_dir")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  discovered_manifests: {}",
+            report
+                .plugins
+                .get("discovered_manifests")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+        println!(
+            "  loaded_plugins: {}",
+            report
+                .plugins
+                .get("loaded_plugins")
+                .unwrap_or(&serde_json::Value::Null)
+        );
+
+        println!("\nProtocol");
+        println!(
+            "  supported: [{}..={}]",
+            report
+                .protocol
+                .get("min")
+                .unwrap_or(&serde_json::Value::Null),
+            report
+                .protocol
+                .get("max")
+                .unwrap_or(&serde_json::Value::Null),
+        );
+
+        println!("\nVS Code Extension");
+        let hint = report
+            .vscode_extension
+            .get("version_hint")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unknown>");
+        println!("  version_hint: {}", hint);
+        println!(
+            "  expected_protocol: [{}..={}]",
+            report
+                .vscode_extension
+                .get("wire_protocol_expected_min")
+                .unwrap_or(&serde_json::Value::Null),
+            report
+                .vscode_extension
+                .get("wire_protocol_expected_max")
+                .unwrap_or(&serde_json::Value::Null),
+        );
+
+        if let Some(remote) = &report.remote {
+            println!("\nRemote");
+            println!("  address: {}", remote.address);
+            println!(
+                "  connect: {}",
+                if remote.connect.ok {
+                    Formatter::success(&remote.connect.message)
+                } else {
+                    Formatter::error(&remote.connect.message)
+                }
+            );
+            if let Some(handshake) = &remote.handshake {
+                println!(
+                    "  handshake: {}",
+                    if handshake.ok {
+                        Formatter::success(&handshake.message)
+                    } else {
+                        Formatter::error(&handshake.message)
+                    }
+                );
+            }
+            if let Some(auth) = &remote.auth {
+                println!(
+                    "  auth: {}",
+                    if auth.ok {
+                        Formatter::success(&auth.message)
+                    } else {
+                        Formatter::error(&auth.message)
+                    }
+                );
+            }
+            if let Some(ping) = &remote.ping {
+                println!(
+                    "  ping: {}",
+                    if ping.ok {
+                        Formatter::success(&ping.message)
+                    } else {
+                        Formatter::error(&ping.message)
+                    }
+                );
+            }
+            if let Some(selected) = remote.selected_protocol {
+                println!("  selected_protocol: {}", selected);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1908,5 +2363,27 @@ mod tests {
         let err = budget_trend_stats_or_err(&empty).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("Failed to compute budget trend statistics"));
+    }
+
+    #[test]
+    fn doctor_report_serializes_with_expected_sections() {
+        let history_path = std::env::temp_dir().join("soroban-debug-doctor-history.json");
+        let report = DoctorReport {
+            binary: binary_status(),
+            config: config_status(),
+            history: history_file_status(&history_path),
+            plugins: plugin_status(),
+            protocol: protocol_status(),
+            remote: None,
+            vscode_extension: vscode_extension_status(None),
+        };
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("binary").is_some());
+        assert!(json.get("config").is_some());
+        assert!(json.get("history").is_some());
+        assert!(json.get("plugins").is_some());
+        assert!(json.get("protocol").is_some());
+        assert!(json.get("vscode_extension").is_some());
     }
 }

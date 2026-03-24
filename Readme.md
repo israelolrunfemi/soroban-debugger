@@ -113,6 +113,26 @@ Then use commands like:
 - `budget` - Show resource usage
 - `q` or `quit` - Exit debugger
 
+## Troubleshooting (Doctor)
+
+For a single, user-facing health report (binary/version, config + history paths, plugin state, protocol range, and optional remote reachability), run:
+
+```bash
+soroban-debug doctor
+```
+
+For machine-readable output suitable for CI logs and support artifacts:
+
+```bash
+soroban-debug doctor --format json
+```
+
+To probe a remote debug server (connect + handshake + ping, with a deterministic timeout):
+
+```bash
+soroban-debug doctor --remote localhost:9229 --timeout-ms 3000
+```
+
 ## Commands
 
 ### Run Command
