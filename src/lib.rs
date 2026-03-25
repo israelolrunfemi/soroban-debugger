@@ -2,6 +2,7 @@
 
 pub mod analyzer;
 pub mod batch;
+pub mod benchmarks;
 pub mod cli;
 pub mod client;
 pub mod codegen;

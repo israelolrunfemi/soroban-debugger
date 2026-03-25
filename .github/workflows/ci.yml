@@ -102,6 +102,13 @@ jobs:
     name: Benchmark Regression Check
     runs-on: ubuntu-latest
     needs: check
+    env:
+      BENCH_WARN_PCT: 10
+      BENCH_FAIL_PCT: 20
+      # Criterion sampling knobs (tune if CI is too noisy/slow)
+      BENCH_SAMPLE_SIZE: 20
+      BENCH_MEASUREMENT_TIME: 5
+      BENCH_WARMUP_TIME: 2
     steps:
       - uses: actions/checkout@v4
         with:
@@ -113,8 +120,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install critcmp
-        run: cargo install critcmp --version 0.1.7 || true # Ignore if already in cache
+      - name: Restore benchmark baseline (from default branch)
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@v4
+        with:
+          path: .bench/baseline.json
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
+          restore-keys: |
+            bench-baseline-${{ runner.os }}-
 
       - name: Verify benchmark script isolation behavior
         shell: bash
@@ -123,6 +136,47 @@ jobs:
       - name: Run benchmark regression check
         shell: bash
         run: bash scripts/check_benchmark_regressions.sh
+      - name: Run benchmarks (current)
+        run: cargo bench --benches -- --noplot --sample-size $BENCH_SAMPLE_SIZE --measurement-time $BENCH_MEASUREMENT_TIME --warm-up-time $BENCH_WARMUP_TIME
+
+      - name: Record current results (JSON)
+        run: cargo run --quiet --bin bench-regression -- record --criterion target/criterion --out .bench/current.json
+
+      - name: Compare against baseline (pass/warn/fail)
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          set -e
+          report="$(cargo run --quiet --bin bench-regression -- compare \
+            --baseline .bench/baseline.json \
+            --current .bench/current.json \
+            --warn-pct "$BENCH_WARN_PCT" \
+            --fail-pct "$BENCH_FAIL_PCT" \
+            --annotate-top 20 \
+            --max-rows 50 \
+            --require-baseline false)"
+          echo "$report"
+          echo "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Update baseline on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p .bench
+          cp .bench/current.json .bench/baseline.json
+
+      - name: Save baseline cache (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v4
+        with:
+          path: .bench/baseline.json
+          key: bench-baseline-${{ runner.os }}-${{ github.sha }}
+
+      - name: Upload baseline artifact (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-${{ runner.os }}
+          path: .bench/baseline.json
 
   check-manpages:
     name: Check man page sync
