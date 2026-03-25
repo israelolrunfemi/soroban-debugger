@@ -20,7 +20,9 @@ echo "Generating fresh man pages into $TEMP_DIR..."
 
 # MAN_OUT_DIR is read by build.rs to redirect man page output to a temp directory.
 # This avoids touching the committed man/man1/ during the diff check.
-MAN_OUT_DIR="$TEMP_MAN_DIR" cargo build --quiet 2>/dev/null
+# The build script (which generates man pages) runs before the main crate is compiled,
+# so we tolerate main-crate compilation failures with || true — man pages are still produced.
+MAN_OUT_DIR="$TEMP_MAN_DIR" cargo build --quiet 2>/dev/null || true
 
 if [ ! -d "$TEMP_MAN_DIR" ]; then
     echo "❌ Man page generation failed: $TEMP_MAN_DIR was not created."

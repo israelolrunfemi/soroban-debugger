@@ -280,7 +280,7 @@ impl SecurityRule for ArithmeticCheckRule {
                     description: format!("Unchecked arithmetic operation detected: {:?}", instr),
                     remediation: "Ensure arithmetic operations are guarded with proper bounds checks or overflow handling.".to_string(),
                     confidence: None,
-                    context: None,
+                    rationale: None,
                 });
             }
         }
@@ -300,6 +300,17 @@ impl ArithmeticCheckRule {
                 | WasmInstruction::I64Sub
                 | WasmInstruction::I64Mul
         )
+    }
+
+    fn is_guarded(instructions: &[WasmInstruction], idx: usize) -> bool {
+        const LOOKAHEAD: usize = 5;
+        let end = (idx + 1 + LOOKAHEAD).min(instructions.len());
+        for instr in &instructions[idx + 1..end] {
+            if matches!(instr, WasmInstruction::BrIf | WasmInstruction::If) {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -449,7 +460,7 @@ impl SecurityRule for CrossContractImportRule {
             remediation: "Review external call sites for reentrancy and authorization checks."
                 .to_string(),
             confidence: None,
-            context: None,
+            rationale: None,
         }])
     }
 }
@@ -527,30 +538,8 @@ impl SecurityRule for UnboundedIterationRule {
             ),
             remediation: "Bound iteration over storage-backed collections (pagination, explicit limits, or capped batch size).".to_string(),
             confidence: analysis.confidence,
-            context: analysis.context,
+            rationale: analysis.rationale,
         };
-
-        // Enhance description with additional context if available
-        if let Some(context) = &finding.context {
-            if let Some(pattern) = &context.storage_call_pattern {
-                if pattern.calls_outside_loops > 0 {
-                    finding.description = format!(
-                        "{} Also found {} storage calls outside loops (may indicate mixed access patterns).",
-                        finding.description,
-                        pattern.calls_outside_loops
-                    );
-                }
-            }
-
-            if let Some(depth) = context.loop_nesting_depth {
-                if depth > 1 {
-                    finding.description = format!(
-                        "{} Loop nesting depth: {} (increased complexity).",
-                        finding.description, depth
-                    );
-                }
-            }
-        }
 
         Ok(vec![finding])
     }
@@ -722,9 +711,6 @@ fn analyze_unbounded_iteration_static(wasm_bytes: &[u8]) -> UnboundedStaticSigna
     ));
 
     signal.confidence = Some(confidence);
-
-    signal.suspicious = storage_calls_in_loops > 0;
-    signal
 
     signal.suspicious = storage_calls_in_loops > 0;
     signal

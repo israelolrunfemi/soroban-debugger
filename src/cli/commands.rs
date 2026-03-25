@@ -1,9 +1,9 @@
 use crate::analyzer::upgrade::{CompatibilityReport, ExecutionDiff, UpgradeAnalyzer};
-use crate::analyzer::{security::{AnalyzerFilter, SecurityAnalyzer, Severity}, symbolic::SymbolicAnalyzer};
+use crate::analyzer::{security::{AnalyzerFilter, SecurityAnalyzer, Severity}, symbolic::{SymbolicAnalyzer, SymbolicConfig}};
 use crate::cli::args::{
     AnalyzeArgs, CompareArgs, HistoryPruneArgs, InspectArgs, InteractiveArgs, OptimizeArgs,
     ProfileArgs, RemoteArgs, ReplArgs, ReplayArgs, RunArgs, ScenarioArgs, ServerArgs, SymbolicArgs,
-    TuiArgs, UpgradeCheckArgs, Verbosity,
+    SymbolicProfile, TuiArgs, UpgradeCheckArgs, Verbosity,
 };
 use crate::debugger::engine::DebuggerEngine;
 use crate::debugger::instruction_pointer::StepMode;
@@ -207,9 +207,9 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
 
 /// Run instruction-level stepping mode.
 fn run_instruction_stepping(
-    _engine: &mut DebuggerEngine,
-    _function: &str,
-    _args: Option<&str>,
+    engine: &mut DebuggerEngine,
+    function: &str,
+    args: Option<&str>,
 ) -> Result<()> {
     logging::log_display(
         "\n=== Instruction Stepping Mode ===",
@@ -1849,7 +1849,7 @@ pub fn server(args: ServerArgs) -> Result<()> {
     ));
     if args.token.is_some() {
         print_info("Token authentication enabled");
-        if token.trim().len() < 16 {
+        if args.token.as_deref().unwrap_or("").trim().len() < 16 {
             print_warning(
                 "Remote debug token is shorter than 16 characters. Prefer at least 16 characters \
                  and ideally a random 32-byte token.",
