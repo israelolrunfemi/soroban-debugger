@@ -32,6 +32,7 @@ export interface DebuggerExecutionResult {
   output: string;
   paused: boolean;
   completed: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface DebuggerInspection {
@@ -40,12 +41,14 @@ export interface DebuggerInspection {
   stepCount: number;
   paused: boolean;
   callStack: string[];
+  sourceLocation?: SourceLocation;
 }
 
 export interface DebuggerContinueResult {
   completed: boolean;
   output?: string;
   paused: boolean;
+  sourceLocation?: SourceLocation;
 }
 
 export interface DebuggerVersionInfo {
@@ -67,6 +70,12 @@ export interface BackendBreakpointCapabilities {
   conditionalBreakpoints: boolean;
   hitConditionalBreakpoints: boolean;
   logPoints: boolean;
+}
+
+export interface SourceLocation {
+  file: string;
+  line: number;
+  column?: number;
 }
 
 export type LaunchPreflightQuickFix =
@@ -668,7 +677,7 @@ export class DebuggerProcess {
         binaryPath,
         ["inspect", "--contract", this.config.contractPath, "--functions"],
         { env: process.env },
-        (error, stdout, stderr) => {
+        (error: Error | null, stdout: string, stderr: string) => {
           clearTimeout(timer);
           if (error) {
             reject(new Error(stderr || stdout || String(error)));
@@ -816,7 +825,7 @@ export class DebuggerProcess {
         }
 
         const port = address.port;
-        server.close((error) => {
+        server.close((error: Error | undefined) => {
           if (error) {
             reject(error);
             return;
