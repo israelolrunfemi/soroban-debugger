@@ -89,6 +89,7 @@ impl SecurityAnalyzer {
                 Box::new(ReentrancyPatternRule),
                 Box::new(CrossContractImportRule),
                 Box::new(UnboundedIterationRule),
+                Box::new(StorageWritePressureRule),
             ],
         }
     }
@@ -627,7 +628,7 @@ impl SecurityRule for UnboundedIterationRule {
     }
 
     fn description(&self) -> &str {
-        "Detects storage-driven loops and unbounded read patterns."
+        "Detects storage-driven loops and unbounded storage-read patterns."
     }
 
     fn severity(&self) -> Severity {
@@ -645,7 +646,7 @@ impl SecurityRule for UnboundedIterationRule {
             severity: Severity::High,
             location: "WASM code section".to_string(),
             description: format!(
-                "Detected loop(s) with storage-read host calls ({} storage calls while inside loop).",
+                "Detected loop(s) with storage-read host calls ({} storage-read calls while inside loop).",
                 analysis.storage_calls_inside_loops
             ),
             remediation: "Bound iteration over storage-backed collections (pagination, explicit limits, or capped batch size).".to_string(),
@@ -678,6 +679,15 @@ struct UnboundedStaticSignal {
     confidence: Option<f32>,
     rationale: Option<String>,
     loop_types: Vec<String>,
+    max_nesting_depth: usize,
+}
+
+#[derive(Debug, Default)]
+struct StorageWriteStaticSignal {
+    suspicious: bool,
+    storage_writes_inside_loops: usize,
+    confidence: Option<f32>,
+    rationale: Option<String>,
     max_nesting_depth: usize,
 }
 
@@ -805,7 +815,7 @@ fn analyze_unbounded_iteration_static(wasm_bytes: &[u8]) -> UnboundedStaticSigna
     signal.loop_types = loop_types_seen.into_iter().collect();
 
     // Calculate confidence based on multiple factors
-    let confidence = if storage_calls_in_loops > 0 {
+    signal.confidence = Some(if storage_calls_in_loops > 0 {
         if signal.max_nesting_depth >= 2 && storage_calls_in_loops >= 3 {
             0.9
         } else if signal.max_nesting_depth > 1 || storage_calls_in_loops > 1 {
@@ -815,14 +825,15 @@ fn analyze_unbounded_iteration_static(wasm_bytes: &[u8]) -> UnboundedStaticSigna
         }
     } else {
         0.2
-    };
+    });
 
     signal.rationale = Some(format!(
-        "Storage calls in loops: {}, max nesting depth: {}, loop types with calls: {:?}",
-        storage_calls_in_loops, signal.max_nesting_depth, loop_types_with_calls
+        "Storage-read calls in loops: {}, max nesting depth: {}, loop types with calls: {:?}, calls outside loops: {}",
+        storage_calls_in_loops,
+        signal.max_nesting_depth,
+        loop_types_with_calls,
+        storage_calls_outside_loops
     ));
-
-    signal.confidence = Some(confidence);
 
     signal.suspicious = storage_calls_in_loops > 0;
     signal
@@ -851,10 +862,6 @@ fn is_storage_read_import(module: &str, name: &str) -> bool {
         if n == *base {
             return true;
         }
-        // Handle prefix-qualified names like "contract_storage_get" or "soroban_storage_has"
-        if n.ends_with(base) {
-            return true;
-        }
         if let Some(suffix) = n.strip_prefix(base) {
             if suffix.is_empty() {
                 return true;
@@ -867,6 +874,48 @@ fn is_storage_read_import(module: &str, name: &str) -> bool {
         }
 
         // Handle prefix-qualified names like "contract_storage_get".
+        if n.ends_with(base) {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn is_storage_write_import(module: &str, name: &str) -> bool {
+    const BASES: &[&str] = &[
+        "storageput",
+        "storageset",
+        "storagedel",
+        "putcontractdata",
+        "setcontractdata",
+        "delcontractdata",
+        "mapput",
+        "vecput",
+        "vecpushback",
+        "contractstorageput",
+        "contractstorageset",
+    ];
+
+    if !is_env_like_module(module) {
+        return false;
+    }
+
+    let n = canonicalize_ascii(name);
+    for base in BASES {
+        if n == *base {
+            return true;
+        }
+        if let Some(suffix) = n.strip_prefix(base) {
+            if suffix.is_empty() {
+                return true;
+            }
+            if let Some(rest) = suffix.strip_prefix('v') {
+                if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
         if n.ends_with(base) {
             return true;
         }
@@ -914,6 +963,208 @@ fn analyze_unbounded_iteration_dynamic(trace: &[DynamicTraceEvent]) -> Option<Se
         remediation: "Use explicit iteration bounds and pagination for storage traversal to avoid gas-denial risks.".to_string(),
         confidence: None,
         rationale: None,
+    })
+}
+
+struct StorageWritePressureRule;
+impl SecurityRule for StorageWritePressureRule {
+    fn name(&self) -> &str {
+        "storage-write-pressure"
+    }
+
+    fn description(&self) -> &str {
+        "Detects loop-driven storage writes and repeated mutation of hot state."
+    }
+
+    fn analyze_static(&self, wasm_bytes: &[u8]) -> Result<Vec<SecurityFinding>> {
+        let analysis = analyze_storage_write_pressure_static(wasm_bytes);
+        if !analysis.suspicious {
+            return Ok(Vec::new());
+        }
+
+        Ok(vec![SecurityFinding {
+            rule_id: self.name().to_string(),
+            severity: Severity::High,
+            location: "WASM code section".to_string(),
+            description: format!(
+                "Detected loop(s) with storage-write host calls ({} storage-write calls while inside loop).",
+                analysis.storage_writes_inside_loops
+            ),
+            remediation: "Coalesce writes in memory, cap mutation batches, and avoid repeated writes to hot keys inside loops.".to_string(),
+            confidence: analysis.confidence,
+            rationale: analysis.rationale,
+        }])
+    }
+
+    fn analyze_dynamic(
+        &self,
+        _executor: Option<&ContractExecutor>,
+        trace: &[DynamicTraceEvent],
+    ) -> Result<Vec<SecurityFinding>> {
+        Ok(analyze_storage_write_pressure_dynamic(trace)
+            .into_iter()
+            .map(|mut finding| {
+                finding.rule_id = self.name().to_string();
+                finding
+            })
+            .collect())
+    }
+}
+
+fn analyze_storage_write_pressure_static(wasm_bytes: &[u8]) -> StorageWriteStaticSignal {
+    let mut storage_import_indices = HashSet::new();
+    let mut imported_func_count = 0u32;
+    let mut control_flow_stack: Vec<ControlFlowFrame> = Vec::new();
+    let mut signal = StorageWriteStaticSignal::default();
+    let mut storage_writes_in_loops = 0usize;
+    let mut storage_writes_outside_loops = 0usize;
+    let mut loop_types_with_writes: HashSet<String> = HashSet::new();
+
+    for payload in Parser::new(0).parse_all(wasm_bytes) {
+        let Ok(payload) = payload else {
+            return signal;
+        };
+
+        match payload {
+            Payload::ImportSection(reader) => {
+                for import in reader.into_iter().flatten() {
+                    if let wasmparser::TypeRef::Func(_) = import.ty {
+                        if is_storage_write_import(import.module, import.name) {
+                            storage_import_indices.insert(imported_func_count);
+                        }
+                        imported_func_count += 1;
+                    }
+                }
+            }
+            Payload::CodeSectionEntry(body) => {
+                let Ok(mut operators) = body.get_operators_reader() else {
+                    continue;
+                };
+
+                while !operators.eof() {
+                    let Ok(op) = operators.read() else {
+                        break;
+                    };
+
+                    match op {
+                        Operator::Loop { .. } => {
+                            let current_depth =
+                                control_flow_stack.iter().filter(|f| f.is_loop()).count();
+                            control_flow_stack.push(ControlFlowFrame::Loop {
+                                loop_type: if current_depth > 0 {
+                                    "nested_loop".to_string()
+                                } else {
+                                    "top_level_loop".to_string()
+                                },
+                            });
+                            signal.max_nesting_depth =
+                                signal.max_nesting_depth.max(current_depth + 1);
+                        }
+                        Operator::Block { .. } => control_flow_stack.push(ControlFlowFrame::Block),
+                        Operator::If { .. } => control_flow_stack.push(ControlFlowFrame::If),
+                        Operator::Else => {}
+                        Operator::End => {
+                            control_flow_stack.pop();
+                        }
+                        Operator::Call { function_index } => {
+                            if !storage_import_indices.contains(&function_index) {
+                                continue;
+                            }
+
+                            if control_flow_stack.iter().any(ControlFlowFrame::is_loop) {
+                                storage_writes_in_loops += 1;
+                                if let Some(loop_frame) =
+                                    control_flow_stack.iter().rev().find(|f| f.is_loop())
+                                {
+                                    if let Some(loop_type) = loop_frame.loop_type() {
+                                        loop_types_with_writes.insert(loop_type.to_string());
+                                    }
+                                }
+                            } else {
+                                storage_writes_outside_loops += 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    signal.storage_writes_inside_loops = storage_writes_in_loops;
+    signal.confidence = Some(
+        if storage_writes_in_loops >= 4 || signal.max_nesting_depth >= 2 {
+            0.9
+        } else if storage_writes_in_loops >= 2 {
+            0.75
+        } else if storage_writes_in_loops == 1 {
+            0.55
+        } else {
+            0.2
+        },
+    );
+    signal.rationale = Some(format!(
+        "Storage-write calls in loops: {}, max nesting depth: {}, loop types with writes: {:?}, writes outside loops: {}",
+        storage_writes_in_loops,
+        signal.max_nesting_depth,
+        loop_types_with_writes,
+        storage_writes_outside_loops
+    ));
+    signal.suspicious = storage_writes_in_loops > 0;
+    signal
+}
+
+fn analyze_storage_write_pressure_dynamic(trace: &[DynamicTraceEvent]) -> Option<SecurityFinding> {
+    let mut write_key_counts: HashMap<&str, usize> = HashMap::new();
+    let mut total_writes = 0usize;
+
+    for entry in trace {
+        if entry.kind == DynamicTraceEventKind::StorageWrite {
+            total_writes += 1;
+            if let Some(key) = entry.storage_key.as_deref() {
+                *write_key_counts.entry(key).or_insert(0) += 1;
+            }
+        }
+    }
+
+    if total_writes == 0 {
+        return None;
+    }
+
+    let unique_keys = write_key_counts.len();
+    let max_writes_for_one_key = write_key_counts.values().copied().max().unwrap_or(0);
+    let repeated_writes = total_writes.saturating_sub(unique_keys);
+    let likely_hot_state_pressure = total_writes >= 32
+        && (max_writes_for_one_key >= 8
+            || repeated_writes >= total_writes / 2
+            || (total_writes >= 64 && unique_keys <= total_writes / 3));
+
+    if !likely_hot_state_pressure {
+        return None;
+    }
+
+    Some(SecurityFinding {
+        rule_id: "storage-write-pressure".to_string(),
+        severity: Severity::High,
+        location: "Dynamic trace".to_string(),
+        description: format!(
+            "Observed high storage-write pressure (writes={}, unique_keys={}, max_writes_single_key={}, repeated_writes={}). This pattern is consistent with loop-driven mutation or repeated writes to hot state.",
+            total_writes,
+            unique_keys,
+            max_writes_for_one_key,
+            repeated_writes
+        ),
+        remediation: "Batch changes in memory, collapse duplicate writes, and bound write-heavy loops to reduce gas-denial risk.".to_string(),
+        confidence: Some(if max_writes_for_one_key >= 16 || total_writes >= 64 {
+            0.9
+        } else {
+            0.75
+        }),
+        rationale: Some(format!(
+            "Repeated writes concentrated on {} unique key(s); hottest key written {} time(s).",
+            unique_keys, max_writes_for_one_key
+        )),
     })
 }
 
@@ -1044,6 +1295,10 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
     }
 
     findings
+}
+
+fn analyze_reentrancy_dynamic(trace: &[DynamicTraceEvent]) -> Vec<SecurityFinding> {
+    analyze_reentrancy_pattern_dynamic(trace)
 }
 
 fn frame_key_for(entry: &DynamicTraceEvent) -> Option<FrameKey> {
@@ -1433,6 +1688,27 @@ mod tests {
     }
 
     #[test]
+    fn storage_write_pressure_dynamic_flags_hot_state_mutation() {
+        let mut trace = Vec::new();
+        for i in 0..40usize {
+            trace.push(DynamicTraceEvent {
+                sequence: i,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "storage_put".to_string(),
+                caller: None,
+                function: Some("rebalance".to_string()),
+                call_depth: Some(0),
+                storage_key: Some(format!("bucket:{}", i % 2)),
+                storage_value: Some(format!("{i}")),
+            });
+        }
+
+        let finding = analyze_storage_write_pressure_dynamic(&trace);
+        assert!(finding.is_some());
+        assert!(matches!(finding.unwrap().severity, Severity::High));
+    }
+
+    #[test]
     fn static_signal_false_for_non_wasm_bytes() {
         let signal = analyze_unbounded_iteration_static(&[1, 2, 3, 4, 5]);
         assert!(!signal.suspicious);
@@ -1622,6 +1898,33 @@ mod tests {
          // -----------------------------------------------------------------------
     // AuthorizationCheckRule — dynamic trace tests
     // -----------------------------------------------------------------------
+
+    #[test]
+    fn storage_write_import_detects_known_variants() {
+        let cases = [
+            ("env", "storage_put"),
+            ("env", "storage_set"),
+            ("env", "storage_del"),
+            ("env", "put_contract_data"),
+            ("env", "set_contract_data"),
+            ("soroban_env", "storage_put"),
+            ("soroban-env-host", "storage_set_v2"),
+        ];
+        for (module, name) in cases {
+            assert!(
+                is_storage_write_import(module, name),
+                "expected is_storage_write_import to match {module}::{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn storage_write_import_ignores_read_only_and_unrelated_names() {
+        assert!(!is_storage_write_import("env", "storage_get"));
+        assert!(!is_storage_write_import("env", "reinvoke_storage_setter"));
+        assert!(!is_storage_write_import("env", "invoke_contract"));
+        assert!(!is_storage_write_import("not_env", "storage_put"));
+    }
 
     // -----------------------------------------------------------------------
     // AuthorizationCheckRule — dynamic trace tests

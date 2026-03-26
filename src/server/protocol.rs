@@ -81,7 +81,9 @@ pub enum DynamicTraceEventKind {
     #[default]
     Diagnostic,
     FunctionCall,
+    /// Read-side storage pressure feeds unbounded-iteration analysis.
     StorageRead,
+    /// Write-side storage pressure feeds storage-write-pressure analysis.
     StorageWrite,
     Authorization,
     CrossContractCall,
@@ -496,7 +498,7 @@ mod tests {
         }"#;
         let err = DebugMessage::parse(json).unwrap_err();
         assert!(
-            err.contains("client_version"),
+            err.contains("request.client_version"),
             "Error should mention missing field: {}",
             err
         );

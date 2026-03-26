@@ -7,6 +7,11 @@ analyze \- Analyze contract for security vulnerabilities
 \fBanalyze\fR <\fB\-c\fR|\fB\-\-contract\fR> [\fB\-f\fR|\fB\-\-function\fR] [\fB\-a\fR|\fB\-\-args\fR] [\fB\-s\fR|\fB\-\-storage\fR] [\fB\-\-timeout\fR] [\fB\-\-format\fR] [\fB\-\-enable\-rule\fR] [\fB\-\-disable\-rule\fR] [\fB\-\-min\-severity\fR] [\fB\-h\fR|\fB\-\-help\fR] 
 .SH DESCRIPTION
 Analyze contract for security vulnerabilities
+.PP
+The analyzer reports distinct findings for storage-read-heavy iteration
+(\fBunbounded-iteration\fR) and write-heavy mutation pressure
+(\fBstorage-write-pressure\fR) so read traversal and hot-state rewrite patterns
+are not conflated.
 .SH OPTIONS
 .TP
 \fB\-c\fR, \fB\-\-contract\fR \fI<CONTRACT>\fR

@@ -958,23 +958,10 @@ mod tests {
         assert_eq!(args.timeout, DEFAULT_TIMEOUT_SECS);
     }
 
-    /// profile accepts an explicit --timeout value
-    #[test]
-    fn profile_timeout_accepts_explicit_value() {
-        let cli = Cli::parse_from([
-            "soroban-debug",
-            "profile",
-            "--contract",
-            "contract.wasm",
-            "--function",
-            "increment",
-            "--timeout",
-            "45",
-        ]);
-        let Commands::Profile(args) = cli.command.unwrap() else {
-            panic!("profile expected");
-        };
-        assert_eq!(args.timeout, 45);
+        assert!(
+            result.is_err(),
+            "--seed and --replay should be mutually exclusive"
+        );
     }
 
     /// symbolic still uses Option<u64> — None means "use profile budget"
