@@ -68,6 +68,16 @@ async function startMockDebuggerServer(options: {
         };
 
         switch (message.request.type) {
+          case "Handshake":
+            respond({
+              type: "HandshakeAck",
+              server_name: "mock-soroban-debug",
+              server_version: "0.1.0",
+              protocol_min: 1,
+              protocol_max: 1,
+              selected_version: 1,
+            });
+            break;
           case 'Authenticate':
             respond({ type: 'Authenticated', success: true, message: 'ok' });
             break;
