@@ -2,7 +2,6 @@ use crate::runtime::executor::ContractExecutor;
 use crate::utils::wasm::{parse_function_signatures, ContractFunctionSignature};
 use crate::{DebuggerError, Result};
 use serde::Serialize;
-use std::cmp;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::time::Instant;
@@ -544,7 +543,7 @@ impl SymbolicAnalyzer {
             };
         }
 
-        let narrowed = &numeric_seeds[..cmp::min(numeric_seeds.len(), 4)];
+        let narrowed = &numeric_seeds[..];
         let mut current = vec![0usize; arg_count];
         loop {
             let args = current
