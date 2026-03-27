@@ -511,6 +511,20 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
         });
     }
 
+    // Remote execution/ping path.
+    if let Some(remote_addr) = &args.remote {
+        return remote(
+            RemoteArgs {
+                remote: remote_addr.clone(),
+                token: args.token.clone(),
+                contract: args.contract.clone(),
+                function: args.function.clone(),
+                args: args.args.clone(),
+            },
+            verbosity,
+        );
+    }
+
     // Initialize output writer
     let mut output_writer = OutputWriter::new(args.save_output.as_deref(), args.append)?;
 

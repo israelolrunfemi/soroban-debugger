@@ -41,10 +41,14 @@ impl DebugServer {
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
     ) -> Result<Self> {
-        let tls_config = if let (Some(cp), Some(kp)) = (cert_path, key_path) {
-            Some(load_tls_config(cp, kp)?)
-        } else {
-            None
+        let tls_config = match (cert_path, key_path) {
+            (Some(cp), Some(kp)) => Some(load_tls_config(cp, kp)?),
+            (None, None) => None,
+            _ => {
+                return Err(miette::miette!(
+                    "TLS not supported unless both certificate and key are provided"
+                ));
+            }
         };
 
         Ok(Self {

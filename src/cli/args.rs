@@ -202,7 +202,11 @@ pub enum Commands {
 #[derive(Parser)]
 pub struct RunArgs {
     /// Path to the contract WASM file
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(
+        short,
+        long,
+        required_unless_present_any = ["server", "remote"]
+    )]
     pub contract: Option<PathBuf>,
 
     /// Deprecated: use --contract instead
@@ -210,7 +214,11 @@ pub struct RunArgs {
     pub wasm: Option<PathBuf>,
 
     /// Function name to execute
-    #[arg(short, long, required_unless_present = "server")]
+    #[arg(
+        short,
+        long,
+        required_unless_present_any = ["server", "remote"]
+    )]
     pub function: Option<String>,
 
     /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
