@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SANDBOX_MODE=0
+if [[ "${1:-}" == "--sandbox" ]]; then
+  SANDBOX_MODE=1
+fi
+
 # Determine repo root relative to this script's location
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
@@ -22,6 +27,12 @@ rustc -Vv
 cargo -V
 cargo clippy -V
 
+if [[ "$SANDBOX_MODE" -eq 1 ]]; then
+  echo
+  echo "==> Sandbox mode enabled"
+  echo "This gate is deterministic and avoids network/temp-dependent checks."
+fi
+
 echo
 echo "==> Formatting (cargo fmt --check)"
 cargo fmt --all -- --check
@@ -33,3 +44,11 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 echo
 echo "==> Tests (deny rustc warnings via RUSTFLAGS)"
 RUSTFLAGS="-D warnings" cargo test --workspace --all-features
+
+if [[ "$SANDBOX_MODE" -eq 1 ]]; then
+  echo
+  echo "==> Sandbox skip report"
+  echo "SKIP: VS Code E2E/loopback gates (depends on local TCP loopback availability)."
+  echo "SKIP: Temp-dir constrained scenarios (depends on writable system temp directories)."
+  echo "Result: ci-sandbox completed successfully."
+fi

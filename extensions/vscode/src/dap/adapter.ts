@@ -58,7 +58,28 @@ function parseRuntimeError(error: unknown): StructuredRuntimeError {
 }
 type LaunchRequestArgs = DebugProtocol.LaunchRequestArguments & DebuggerProcessConfig;
 
+type BreakpointResolutionLogRecord = {
+  source: string;
+  requestedLine: number;
+  resolvedLine: number;
+  functionName?: string;
+  verified: boolean;
+  setBreakpoint: boolean;
+  reasonCode?: string;
+  message?: string;
+};
+
+type BreakpointSyncLogRecord = {
+  source: string;
+  action: 'clear' | 'set';
+  breakpointId: string;
+  functionName?: string;
+  success: boolean;
+  error?: string;
+};
+
 export class SorobanDebugSession extends DebugSession {
+  private static readonly FIRST_CONTINUE_STOP_REASON: 'breakpoint' = 'breakpoint';
   private logManager: LogManager | undefined;
   private debuggerProcess: DebuggerProcess | null = null;
   private state: DebuggerState = {
@@ -79,6 +100,7 @@ export class SorobanDebugSession extends DebugSession {
   private hasExecuted = false;
   private exportedFunctions = new Set<string>();
   private sourceFunctionBreakpoints = new Map<string, Set<string>>();
+  private breakpointFunctionHistory = new Map<string, Map<number, string>>();
   private requestAbortControllers = new Map<number, AbortController>();
   private refreshAbortController: AbortController | null = null;
   private refreshGeneration = 0;
@@ -200,8 +222,9 @@ export class SorobanDebugSession extends DebugSession {
           ? serverResolved.every((bp) => ['NO_DEBUG_INFO', 'FILE_NOT_IN_DEBUG_INFO', 'WASM_PARSE_ERROR'].includes(bp.reasonCode))
           : false;
 
+        const sourceHistory = this.breakpointFunctionHistory.get(source);
         if (serverResolved && shouldFallbackHeuristic) {
-          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions, sourceHistory);
         } else if (serverResolved) {
           resolved = serverResolved.map((bp) => ({
             requestedLine: bp.requestedLine,
@@ -213,7 +236,7 @@ export class SorobanDebugSession extends DebugSession {
             setBreakpoint: bp.verified && Boolean(bp.functionName)
           }));
         } else {
-          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions, sourceHistory);
         }
       }
 
@@ -230,6 +253,25 @@ export class SorobanDebugSession extends DebugSession {
           logMessage: bp.logMessage
         };
       });
+
+      for (const bp of breakpoints) {
+        const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.requestedLine === bp.line);
+        const resolutionRecord: BreakpointResolutionLogRecord = {
+          source,
+          requestedLine: bp.line,
+          resolvedLine: match?.line ?? bp.line,
+          functionName: match?.functionName,
+          verified: match?.verified ?? false,
+          setBreakpoint: Boolean(match?.setBreakpoint && match?.functionName),
+          reasonCode: match?.reasonCode,
+          message: match?.message,
+        };
+        this.logManager?.log(
+          ManagerLogLevel.Debug,
+          LogPhase.DAP,
+          `BREAKPOINT_RESOLUTION ${JSON.stringify(resolutionRecord)}`
+        );
+      }
 
       const syncErrors = await this.syncSourceBreakpoints(
         source,
@@ -253,18 +295,38 @@ export class SorobanDebugSession extends DebugSession {
         )
       );
 
+      const updatedHistory = this.breakpointFunctionHistory.get(source) ?? new Map<number, string>();
+      for (const bp of resolved) {
+        if (bp.functionName) {
+          updatedHistory.set(bp.requestedLine, bp.functionName);
+        } else {
+          updatedHistory.delete(bp.requestedLine);
+        }
+      }
+      if (updatedHistory.size > 0) {
+        this.breakpointFunctionHistory.set(source, updatedHistory);
+      } else {
+        this.breakpointFunctionHistory.delete(source);
+      }
+
       response.body = {
         breakpoints: breakpoints.map((bp) => {
           const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.requestedLine === bp.line);
           const mbp = managedBreakpoints.find(m => m.line === bp.line);
           const syncMessage = mbp ? syncErrors.get(mbp.id) : undefined;
           const capabilityMessages = this.describeCapabilityFallback(bp);
+          const reasonCode = match?.reasonCode;
+          const reasonMessage = match?.message;
+          const composedMessage = reasonCode
+            ? `${reasonCode}: ${reasonMessage ?? 'No additional diagnostic message'}`
+            : reasonMessage;
           return {
             verified: match?.verified ?? false,
             line: match?.line ?? bp.line,
             column: bp.column,
             source: args.source,
-            message: match?.message,
+            message: composedMessage,
+            reasonCode,
           }
         })
       };
@@ -498,7 +560,8 @@ export class SorobanDebugSession extends DebugSession {
       this.sendResponse(response);
 
       if (!this.hasExecuted) {
-        await this.runExecution('breakpoint');
+        // After the synthetic entry stop, the first continue should surface as a breakpoint stop.
+        await this.runExecution(SorobanDebugSession.FIRST_CONTINUE_STOP_REASON);
         return;
       }
 
@@ -725,6 +788,18 @@ export class SorobanDebugSession extends DebugSession {
 
     for (const breakpoint of previousBreakpoints) {
       await this.debuggerProcess.clearBreakpoint(breakpoint.id);
+      const clearRecord: BreakpointSyncLogRecord = {
+        source,
+        action: 'clear',
+        breakpointId: breakpoint.id,
+        functionName: breakpoint.functionName,
+        success: true,
+      };
+      this.logManager?.log(
+        ManagerLogLevel.Debug,
+        LogPhase.DAP,
+        `BREAKPOINT_SYNC ${JSON.stringify(clearRecord)}`
+      );
     }
 
     for (const breakpoint of nextBreakpoints) {
@@ -736,10 +811,36 @@ export class SorobanDebugSession extends DebugSession {
           hitCondition: breakpoint.hitCondition,
           logMessage: breakpoint.logMessage
         });
+        const setRecord: BreakpointSyncLogRecord = {
+          source,
+          action: 'set',
+          breakpointId: breakpoint.id,
+          functionName: breakpoint.functionName,
+          success: true,
+        };
+        this.logManager?.log(
+          ManagerLogLevel.Debug,
+          LogPhase.DAP,
+          `BREAKPOINT_SYNC ${JSON.stringify(setRecord)}`
+        );
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         errors.set(
           breakpoint.id,
-          error instanceof Error ? error.message : String(error)
+          errorMessage
+        );
+        const setRecord: BreakpointSyncLogRecord = {
+          source,
+          action: 'set',
+          breakpointId: breakpoint.id,
+          functionName: breakpoint.functionName,
+          success: false,
+          error: errorMessage,
+        };
+        this.logManager?.log(
+          ManagerLogLevel.Debug,
+          LogPhase.DAP,
+          `BREAKPOINT_SYNC ${JSON.stringify(setRecord)}`
         );
       }
     }
@@ -835,6 +936,7 @@ export class SorobanDebugSession extends DebugSession {
     this.state.args = undefined;
     this.hasExecuted = false;
     this.sourceFunctionBreakpoints.clear();
+    this.breakpointFunctionHistory.clear();
   }
 
   private describeCapabilityFallback(bp: DebugProtocol.SourceBreakpoint): string | undefined {

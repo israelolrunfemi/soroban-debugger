@@ -672,6 +672,16 @@ async function runDapHappyPathE2E(
       false,
       "Expected heuristic source mapping to be unverified",
     );
+    assert.equal(
+      setBps.body?.breakpoints?.[0]?.reasonCode,
+      "HEURISTIC_NO_DWARF",
+      "Expected heuristic reason code on source breakpoint response",
+    );
+    assert.match(
+      String(setBps.body?.breakpoints?.[0]?.message || ""),
+      /HEURISTIC_NO_DWARF/,
+      "Expected breakpoint message to include heuristic reason code",
+    );
 
     const configDone = await client.request("configurationDone", {});
     assert.equal(
@@ -685,10 +695,20 @@ async function runDapHappyPathE2E(
     const cont = await client.request("continue", { threadId: 1 }, 30_000);
     assert.equal(cont.success, true, `continue failed: ${cont.message || ""}`);
 
-    await client.waitForEvent(
-      "stopped",
-      (e) => e.body?.reason === "breakpoint",
+    const firstEventAfterContinue = await client.waitForAnyEvent(
+      ["stopped", "exited"],
+      () => true,
       30_000,
+    );
+    assert.equal(
+      firstEventAfterContinue.event,
+      "stopped",
+      `Expected continue to pause at breakpoint before exit; got ${firstEventAfterContinue.event}`,
+    );
+    assert.equal(
+      firstEventAfterContinue.body?.reason,
+      "breakpoint",
+      `Expected first stop after continue to be 'breakpoint'; got '${String(firstEventAfterContinue.body?.reason)}'`,
     );
 
     const threads = await client.request("threads", {});

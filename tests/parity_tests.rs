@@ -284,7 +284,10 @@ fn parity_shared_function_breakpoint_accepted() {
 #[test]
 fn parity_dap_server_starts_and_accepts_connection() {
     if !network::can_bind_loopback() {
-        eprintln!("Skipping parity_dap_server_starts_and_accepts_connection: loopback restricted");
+        eprintln!(
+            "Skipping parity_dap_server_starts_and_accepts_connection: loopback networking \
+             restricted (EPERM or equivalent) – see docs/remote-troubleshooting.md."
+        );
         return;
     }
 
@@ -340,9 +343,10 @@ fn parity_dap_server_starts_and_accepts_connection() {
             );
         }
         Err(e) => {
-            // Skip if the server could not start (port in use, env issue, etc.)
+            // Skip if the server could not start (port in use, EPERM, env issue, etc.)
             eprintln!(
-                "Skipping parity_dap_server_starts_and_accepts_connection: {}",
+                "Skipping parity_dap_server_starts_and_accepts_connection: {} – \
+                 see docs/remote-troubleshooting.md.",
                 e
             );
         }
@@ -355,7 +359,10 @@ fn parity_dap_server_starts_and_accepts_connection() {
 #[test]
 fn parity_dap_server_rejects_invalid_token() {
     if !network::can_bind_loopback() {
-        eprintln!("Skipping parity_dap_server_rejects_invalid_token: loopback restricted");
+        eprintln!(
+            "Skipping parity_dap_server_rejects_invalid_token: loopback networking \
+             restricted (EPERM or equivalent) – see docs/remote-troubleshooting.md."
+        );
         return;
     }
 
@@ -412,7 +419,11 @@ fn parity_dap_server_rejects_invalid_token() {
             );
         }
         Err(e) => {
-            eprintln!("Skipping parity_dap_server_rejects_invalid_token: {}", e);
+            eprintln!(
+                "Skipping parity_dap_server_rejects_invalid_token: {} – \
+                 see docs/remote-troubleshooting.md.",
+                e
+            );
         }
     }
 }

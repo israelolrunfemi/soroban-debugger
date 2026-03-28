@@ -1,4 +1,5 @@
 {
+  "$schema": "./package.schema.json",
   "name": "soroban-debugger",
   "displayName": "Soroban Debugger",
   "description": "Debug adapter for Soroban smart contracts with breakpoints, variable inspection, and call stack visualization",
@@ -24,9 +25,7 @@
     "smart-contract"
   ],
   "activationEvents": [
-    "onDebugResolve:soroban",
-    "onCommand:soroban-debugger.runLaunchPreflight",
-    "onCommand:soroban-debugger.diagnoseSourceMap"
+    "onDebugResolve:soroban"
   ],
   "main": "./dist/extension.js",
   "contributes": {
@@ -159,7 +158,8 @@
     "ci": "npm run build && npm run test",
     "test:all": "node ./dist/test/runTest.js",
     "test:smoke": "node ./dist/test/runSmokeTest.js",
-    "test:dap-e2e": "node ./dist/test/runDapE2E.js"
+    "test:dap-e2e": "node ./dist/test/runDapE2E.js",
+    "test:dap-e2e:repeat": "node ./dist/test/runDapE2E.js --repeat 10"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",

@@ -63,6 +63,20 @@ To install:
 1. Install `pre-commit` locally (e.g., `pip install pre-commit` or `brew install pre-commit`).
 2. Run `pre-commit install` in the repository root to activate the hooks.
 
+By default, pre-commit runs strict clippy with CI-equivalent flags via the `cargo-clippy` hook (`cargo clippy --workspace --all-targets --all-features -- -D warnings`).
+
+If your commit only changes non-Rust files (for example docs or markdown) and you need to bypass clippy for that commit, use:
+
+```bash
+SKIP=cargo-clippy git commit -m "docs: update troubleshooting guide"
+```
+
+You can still run all hooks manually at any time:
+
+```bash
+pre-commit run --all-files
+```
+
 ---
 
 ## Project Setup
@@ -185,6 +199,12 @@ cargo fmt --all -- --check
 
 ```bash
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+Equivalent make target:
+
+```bash
+make lint-strict
 ```
 
 ### Guidelines
