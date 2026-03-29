@@ -183,6 +183,19 @@ async function waitForProcessLog(
   throw new Error(`Timed out waiting for process log matching ${pattern}`);
 }
 
+async function assertProcessLogAbsent(
+  getOutput: () => string,
+  pattern: RegExp,
+  waitMs = 500,
+): Promise<void> {
+  await wait(waitMs);
+  assert.doesNotMatch(
+    getOutput(),
+    pattern,
+    `Did not expect process log matching ${pattern}`,
+  );
+}
+
 function resolveFixtures(): TestFixtures {
   const extensionRoot = process.cwd();
   const repoRoot = path.resolve(extensionRoot, "..", "..");
@@ -593,7 +606,7 @@ export async function runSmokeSuite(): Promise<void> {
   const exportedFunctions = await debuggerProcess.getContractFunctions();
   const resolvedBreakpoints = resolveSourceBreakpoints(
     fixtures.sourcePath,
-    [10],
+    [14],
     exportedFunctions,
   );
   assert.equal(
@@ -608,10 +621,36 @@ export async function runSmokeSuite(): Promise<void> {
     "Expected heuristic mapping to still set a function breakpoint",
   );
 
+  const nonExportedBreakpoints = resolveSourceBreakpoints(
+    fixtures.sourcePath,
+    [10],
+    exportedFunctions,
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].verified,
+    false,
+    "Expected non-exported function mapping to be unverified",
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].functionName,
+    "helper",
+    "Expected non-exported function line to map to helper",
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].reasonCode,
+    "HEURISTIC_NOT_EXPORTED",
+    "Expected non-exported function reason code",
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].setBreakpoint,
+    false,
+    "Expected non-exported function mapping to skip runtime breakpoint install",
+  );
+
   // Test HEURISTIC_NO_FUNCTION behavior for lines outside any function
   const noFunctionBreakpoints = resolveSourceBreakpoints(
     fixtures.sourcePath,
-    [1, 2, 13], // Lines outside any function in lib.rs
+    [1, 2, 12, 16], // Lines outside any function in lib.rs
     exportedFunctions,
   );
 
@@ -833,7 +872,7 @@ async function runDapHappyPathE2E(
 
     const setBps = await client.request("setBreakpoints", {
       source: { path: fixtures.sourcePath },
-      breakpoints: [{ line: 10 }],
+      breakpoints: [{ line: 14 }],
     });
     assert.equal(
       setBps.success,
@@ -863,6 +902,35 @@ async function runDapHappyPathE2E(
       breakpointSyncLog,
       /BREAKPOINT_SYNC_TEST/,
       "Expected adapter test log to confirm runtime breakpoint installation",
+    );
+
+    const privateBps = await client.request("setBreakpoints", {
+      source: { path: fixtures.sourcePath },
+      breakpoints: [{ line: 10 }],
+    });
+    assert.equal(
+      privateBps.success,
+      true,
+      `setBreakpoints for non-exported function failed: ${privateBps.message || ""}`,
+    );
+    assert.equal(
+      privateBps.body?.breakpoints?.[0]?.verified,
+      false,
+      "Expected non-exported function source mapping to be unverified",
+    );
+    assert.equal(
+      privateBps.body?.breakpoints?.[0]?.reasonCode,
+      "HEURISTIC_NOT_EXPORTED",
+      "Expected non-exported reason code on source breakpoint response",
+    );
+    assert.match(
+      String(privateBps.body?.breakpoints?.[0]?.message || ""),
+      /HEURISTIC_NOT_EXPORTED/,
+      "Expected non-exported breakpoint message to include reason code",
+    );
+    await assertProcessLogAbsent(
+      () => stderrOutput,
+      /BREAKPOINT_SYNC_TEST .*"action":"set".*"functionName":"helper".*"success":true/,
     );
 
     const configDone = await client.request("configurationDone", {});
