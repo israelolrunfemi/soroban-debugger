@@ -6,7 +6,11 @@ pub struct Echo;
 
 #[contractimpl]
 impl Echo {
-    pub fn echo(_env: Env, v: Val) -> Val {
+    fn helper(v: Val) -> Val {
         v
+    }
+
+    pub fn echo(_env: Env, v: Val) -> Val {
+        Self::helper(v)
     }
 }
