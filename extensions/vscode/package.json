@@ -111,6 +111,20 @@
                 "description": "Optional single-line authentication token for the debugger server.",
                 "minLength": 1,
                 "pattern": ".*\\S.*"
+              },
+              "storageFilter": {
+                "type": "array",
+                "description": "Filter storage view to only show keys matching pattern (e.g. ['balance:*', 're:^contract_.*']).",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "repeat": {
+                "type": "integer",
+                "description": "Repeat execution N times and show throughput/latency stats in the Debug Console.",
+                "minimum": 1,
+                "default": 1
               }
             }
           },
@@ -171,6 +185,20 @@
                 "type": "number",
                 "description": "Timeout (ms) to wait for the remote server to become reachable.",
                 "default": 10000
+              },
+              "storageFilter": {
+                "type": "array",
+                "description": "Filter storage view to only show keys matching pattern.",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "repeat": {
+                "type": "integer",
+                "description": "Repeat execution N times and show throughput/latency stats.",
+                "minimum": 1,
+                "default": 1
               }
             }
           }

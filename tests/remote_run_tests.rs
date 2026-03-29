@@ -56,13 +56,16 @@ fn test_remote_run_execution() {
         wasm_path
     }
 
+    // Allocate an ephemeral free port for this test.
+    let port = network::allocate_ephemeral_port().expect("Failed to allocate ephemeral port");
+
     // Start server in background
     let mut server_cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("soroban-debug"));
 
     let mut server_child = server_cmd
         .arg("server")
         .arg("--port")
-        .arg("9245")
+        .arg(port.to_string())
         .arg("--token")
         .arg("secret")
         .spawn()
@@ -76,7 +79,7 @@ fn test_remote_run_execution() {
     ping_cmd
         .arg("run")
         .arg("--remote")
-        .arg("127.0.0.1:9245")
+        .arg(format!("127.0.0.1:{}", port))
         .arg("--token")
         .arg("secret")
         .assert()
@@ -90,7 +93,7 @@ fn test_remote_run_execution() {
     let assert = client_cmd
         .arg("run")
         .arg("--remote")
-        .arg("127.0.0.1:9245")
+        .arg(format!("127.0.0.1:{}", port))
         .arg("--token")
         .arg("secret")
         .arg("--contract")

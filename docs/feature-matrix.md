@@ -65,9 +65,9 @@ Legend:
 
 | Feature | CLI flag / command | VS Code Extension | Notes |
 |---|---|---|---|
-| Prefix filter (`balance:*`) | `--storage-filter 'balance:*'` (repeatable) | NO | No `storageFilter` launch config field. All storage keys are shown unfiltered in the Variables panel. |
-| Regex filter (`re:<pattern>`) | `--storage-filter 're:^user_\d+$'` | NO | |
-| Exact-key filter | `--storage-filter exact_key` | NO | |
+| Prefix filter (`balance:*`) | `--storage-filter 'balance:*'` (repeatable) | YES — `"storageFilter"` in `launch.json` | Extension filters storage keys shown in the Variables panel. |
+| Regex filter (`re:<pattern>`) | `--storage-filter 're:^user_\d+$'` | YES | |
+| Exact-key filter | `--storage-filter exact_key` | YES | |
 | Export storage after execution | `--export-storage <file>` | NO | |
 | Import storage before execution | `--import-storage <file>` | PARTIAL | Use `snapshotPath` in `launch.json` for initial contract state instead. |
 
@@ -81,8 +81,8 @@ Legend:
 | Configure server port | `--port <n>` on `server` command | YES — `"port"` in `launch.json` | |
 | Configure auth token | `--token <t>` on `server` command | YES — `"token"` in `launch.json` | |
 | Connect as remote client | `soroban-debug remote --remote <host:port>` | YES — `"request": "attach"` in `launch.json` | Set `request: "attach"`, `host`, and `port` in `launch.json`. The extension connects to the pre-existing server without spawning a subprocess. |
-| TLS encryption — server | `--tls-cert <file> --tls-key <file>` on `server` | NO | No TLS config fields in `launch.json`. |
-| TLS encryption — client | `--tls-cert`/`--tls-key` on `remote` | NO | |
+| TLS encryption — server | `--tls-cert <file> --tls-key <file>` on `server` | YES — CLI flags | Pass `--tls-cert/--tls-key` when spawning the server. |
+| TLS encryption — client | `--tls-cert`/`--tls-key`/`--tls-ca` on `remote` | YES | CLI flags for `remote` subcommand. |
 
 ---
 
@@ -91,7 +91,7 @@ Legend:
 | Feature | CLI flag / command | VS Code Extension | Notes |
 |---|---|---|---|
 | Batch arguments from file | `--batch-args <file.json>` | NO | No `batchArgs` field in `launch.json`. |
-| Repeat execution N times | `--repeat <n>` | NO | |
+| Repeat execution N times | `--repeat <n>` | YES — `"repeat"` in `launch.json` | Execution runs N times; aggregate stats shown in Debug Console. |
 
 ---
 
@@ -128,14 +128,14 @@ For VS Code users, this table maps CLI flags to their `launch.json` equivalents.
 | `--port` | `port` | YES |
 | `--token` | `token` | YES |
 | `--breakpoint` | Set via editor gutter clicks | YES |
-| `--storage-filter` | (none) | NO |
+| `--storage-filter` | `storageFilter` | YES |
 | `--show-auth` | (none) | NO |
 | `--instruction-debug` | (none) | NO |
 | `--step-instructions` | (none) | NO |
 | `--step-mode` | (none) | NO |
 | `--batch-args` | (none) | NO |
-| `--repeat` | (none) | NO |
-| `--tls-cert` / `--tls-key` | (none) | NO |
+| `--repeat` | `repeat` | YES |
+| `--tls-cert` / `--tls-key` | Passed via CLI arguments | YES |
 | `--import-storage` | Use `snapshotPath` instead | PARTIAL |
 | `--export-storage` | (none) | NO |
 | `--show-events` | (none) | NO |

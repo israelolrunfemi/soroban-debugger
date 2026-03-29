@@ -28,6 +28,8 @@ pub struct DebugServer {
     pending_execution: Option<PendingExecution>,
     shutdown: Arc<Notify>,
     contract_wasm: Option<Vec<u8>>,
+    repeat_count: Option<u32>,
+    storage_filter: Vec<String>,
 }
 
 struct PendingExecution {
@@ -40,6 +42,8 @@ impl DebugServer {
         token: Option<String>,
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
+        repeat_count: Option<u32>,
+        storage_filter: Vec<String>,
     ) -> Result<Self> {
         let tls_config = match (cert_path, key_path) {
             (Some(cp), Some(kp)) => Some(load_tls_config(cp, kp)?),
@@ -58,6 +62,8 @@ impl DebugServer {
             pending_execution: None,
             shutdown: Arc::new(Notify::new()),
             contract_wasm: None,
+            repeat_count,
+            storage_filter,
         })
     }
 
@@ -465,7 +471,38 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::Execute { function, args } => match self.engine.as_mut() {
+                DebugRequest::Execute { function, args } => {
+                    if let Some(count) = self.repeat_count {
+                        if count > 1 {
+                            if let Some(wasm) = &self.contract_wasm {
+                                let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list().into_iter().map(|b| b.function).collect()).unwrap_or_default();
+                                let initial_storage = self.engine.as_ref().and_then(|e| e.executor().get_storage_snapshot().ok()).and_then(|s| serde_json::to_string(&s).ok());
+                                let runner = crate::repeat::RepeatRunner::new(wasm.clone(), breakpoints, initial_storage);
+                                match runner.run(&function, args.as_deref(), count) {
+                                    Ok(stats) => {
+                                        let output = format!("--- Repeat Execution ({} runs) ---\n\nDuration:\n  Min: {:.2}ms, Max: {:.2}ms, Avg: {:.2}ms\n\nCPU Instructions:\n  Min: {}, Max: {}, Avg: {}\n\nMemory (bytes):\n  Min: {}, Max: {}, Avg: {}\n\nResults: {}", 
+                                            count, 
+                                            stats.min_duration.as_secs_f64()*1000.0, stats.max_duration.as_secs_f64()*1000.0, stats.avg_duration.as_secs_f64()*1000.0,
+                                            stats.min_cpu, stats.max_cpu, stats.avg_cpu,
+                                            stats.min_memory, stats.max_memory, stats.avg_memory,
+                                            if stats.inconsistent_results { "INCONSISTENT" } else { "CONSISTENT" }
+                                        );
+                                        return Ok(DebugResponse::ExecutionResult {
+                                            success: true,
+                                            output,
+                                            error: None,
+                                            paused: false,
+                                            completed: true,
+                                            source_location: None,
+                                        });
+                                    }
+                                    Err(e) => return Ok(DebugResponse::Error { message: e.to_string() }),
+                                }
+                            }
+                        }
+                    }
+
+                    match self.engine.as_mut() {
                     Some(engine) if engine.breakpoints().should_break(&function) => {
                         match current_storage(engine) {
                             Ok(storage) => match engine.breakpoints_mut().on_hit(
@@ -755,12 +792,22 @@ impl DebugServer {
                 },
                 DebugRequest::GetStorage => match self.engine.as_ref() {
                     Some(engine) => match engine.executor().get_storage_snapshot() {
-                        Ok(snapshot) => match serde_json::to_string(&snapshot) {
-                            Ok(json) => DebugResponse::StorageState { storage_json: json },
-                            Err(e) => DebugResponse::Error {
-                                message: format!("Failed to serialize storage snapshot: {}", e),
-                            },
-                        },
+                        Ok(mut snapshot) => {
+                            if !self.storage_filter.is_empty() {
+                                if let Ok(filter) = crate::inspector::storage::StorageFilter::new(&self.storage_filter) {
+                                    snapshot = snapshot
+                                        .into_iter()
+                                        .filter(|(k, _)| filter.matches(k))
+                                        .collect();
+                                }
+                            }
+                            match serde_json::to_string(&snapshot) {
+                                Ok(json) => DebugResponse::StorageState { storage_json: json },
+                                Err(e) => DebugResponse::Error {
+                                    message: format!("Failed to serialize storage snapshot: {}", e),
+                                },
+                            }
+                        }
                         Err(e) => DebugResponse::Error {
                             message: e.to_string(),
                         },

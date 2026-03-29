@@ -295,7 +295,7 @@ fn parity_dap_server_starts_and_accepts_connection() {
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let port = 19_230u16;
+    let port = network::allocate_ephemeral_port().expect("Failed to allocate ephemeral port");
     let token = "parity-test-token-ok";
 
     let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
@@ -370,7 +370,7 @@ fn parity_dap_server_rejects_invalid_token() {
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let port = 19_231u16;
+    let port = network::allocate_ephemeral_port().expect("Failed to allocate ephemeral port");
     let real_token = "real-parity-token";
     let wrong_token = "wrong-parity-token";
 

@@ -1047,6 +1047,14 @@ pub struct ServerArgs {
     /// TLS private key file path (optional)
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
+
+    /// Repeat execution N times and show throughput/latency stats
+    #[arg(long, value_name = "N")]
+    pub repeat: Option<u32>,
+
+    /// Filter storage view to only show keys matching pattern (repeatable)
+    #[arg(long, value_name = "PATTERN")]
+    pub storage_filter: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -1066,6 +1074,18 @@ pub struct RemoteArgs {
     /// Function name to execute
     #[arg(short, long)]
     pub function: Option<String>,
+
+    /// TLS certificate file path (optional)
+    #[arg(long)]
+    pub tls_cert: Option<PathBuf>,
+
+    /// TLS private key file path (optional)
+    #[arg(long)]
+    pub tls_key: Option<PathBuf>,
+
+    /// TLS CA certificate file path (optional, for self-signed certs)
+    #[arg(long)]
+    pub tls_ca: Option<PathBuf>,
 
     /// Function arguments as JSON array
     #[arg(short, long)]

@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
-# Regenerates man pages into a temp directory and diffs against committed versions.
-# Exits non-zero with a clear diff output if drift is detected.
+# Two-phase doc consistency check:
+#   1. Regenerates man pages into a temp directory and diffs against committed
+#      versions.  Exits non-zero if the CLI source has drifted from the .1 files.
+#   2. Scans README.md for --option-name references in documentation blocks and
+#      verifies that each one exists in a committed man page.  Exits non-zero if
+#      README documents options that are not present in the CLI.
 #
 # Usage: bash scripts/check_manpages.sh
 #   or:  make check-man
@@ -113,7 +117,7 @@ diff_status=${diff_status:-0}
 
 if [ "$diff_status" -eq 0 ]; then
     echo "OK: Man pages are in sync."
-    exit 0
+    # Fall through to README option drift check below.
 elif [ "$diff_status" -eq 1 ]; then
     echo ""
     echo "ERROR: Drift detected between committed man pages and current CLI source."
@@ -127,3 +131,67 @@ else
     echo "$diff_output"
     exit 2
 fi
+
+# ── README option drift check ────────────────────────────────────────────────
+# Verifies that every --option-name documented in README.md also exists in a
+# committed man page.  Only lines with two or more leading spaces are scanned —
+# these are option-table entries ("  --opt  desc") and shell-continuation args
+# ("  --opt" in multi-line soroban-debug examples).  Lines starting at column 0
+# (cargo, docker, git invocations) are intentionally excluded.
+echo ""
+echo "Checking README.md option references against committed man pages..."
+
+README="$REPO_ROOT/README.md"
+
+if [ ! -f "$README" ]; then
+    echo "WARNING: README.md not found, skipping option drift check."
+    exit 0
+fi
+
+# Step 1: extract --option-name patterns from indented README lines.
+readme_opts=$(grep -E '^[[:space:]]{2,}' "$README" \
+    | grep -oE '\-\-[a-z][a-z0-9-]+' \
+    | sort -u) || true
+
+if [ -z "$readme_opts" ]; then
+    echo "OK: No --option references found in README.md documentation blocks."
+    exit 0
+fi
+
+# Step 2: extract --option-name patterns from committed man pages.
+# In roff, long options are encoded as \fB\-\-option\-name\fR where each
+# hyphen is escaped as \-.  The alternation ([a-z0-9]|\\-) matches letters,
+# digits, and escaped hyphens but stops cleanly before \fR/\fI/etc.
+man_opts=$(grep -hEo '\\-\\-([a-z0-9]|\\-)+' "$COMMITTED_DIR"/*.1 2>/dev/null \
+    | sed 's/\\-/-/g' \
+    | grep '^--' \
+    | sort -u) || true
+
+if [ -z "$man_opts" ]; then
+    echo "ERROR: No options extracted from committed man pages at $COMMITTED_DIR." >&2
+    echo "   Run 'make regen-man' to generate and commit man pages first." >&2
+    exit 2
+fi
+
+# Step 3: report any README options absent from every man page.
+unknown=()
+while IFS= read -r opt; do
+    if ! printf '%s\n' "$man_opts" | grep -qxF -- "$opt"; then
+        unknown+=("$opt")
+    fi
+done <<< "$readme_opts"
+
+if [ "${#unknown[@]}" -eq 0 ]; then
+    echo "OK: All README option references match the CLI man pages."
+    exit 0
+fi
+
+echo "" >&2
+echo "ERROR: README.md references options not found in any CLI man page:" >&2
+for opt in "${unknown[@]}"; do
+    echo "   $opt" >&2
+done
+echo "" >&2
+echo "Either remove the option from README.md or add it to the CLI source" >&2
+echo "and run 'make regen-man' to regenerate man pages." >&2
+exit 1

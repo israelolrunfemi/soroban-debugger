@@ -6,6 +6,7 @@ import {
   WIRE_PROTOCOL_MAX_VERSION,
   WIRE_PROTOCOL_MIN_VERSION,
 } from "../dap/protocol";
+import { shouldPromoteToFunctionBreakpoint } from "../dap/sourceBreakpoints";
 import { LogManager, LogLevel, LogPhase } from "../debug/logManager";
 
 export interface DebuggerProcessConfig {
@@ -32,6 +33,8 @@ export interface DebuggerProcessConfig {
    * Intended for remote-attach workflows and tests.
    */
   spawnServer?: boolean;
+  storageFilter?: string[];
+  repeat?: number;
 }
 
 export interface DebuggerExecutionResult {
@@ -722,6 +725,7 @@ export class DebuggerProcess {
       functionName: bp.function,
       reasonCode: bp.reason_code,
       message: bp.message,
+      setBreakpoint: shouldPromoteToFunctionBreakpoint(bp.verified, bp.function, bp.reason_code),
     }));
   }
 
@@ -780,6 +784,16 @@ export class DebuggerProcess {
 
     if (this.config.token) {
       args.push("--token", this.config.token);
+    }
+
+    if (this.config.storageFilter && this.config.storageFilter.length > 0) {
+      for (const filter of this.config.storageFilter) {
+        args.push("--storage-filter", filter);
+      }
+    }
+
+    if (this.config.repeat && this.config.repeat > 1) {
+      args.push("--repeat", String(this.config.repeat));
     }
 
     return args;

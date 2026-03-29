@@ -233,7 +233,12 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-      - name: Check man pages are up to date
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+      - name: Verify check_manpages isolation behavior
+        shell: bash
+        run: bash scripts/test_manpage_tmpdir.sh
+      - name: Check man pages and README options are up to date
         run: make check-man
 
   coverage:

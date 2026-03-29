@@ -2,10 +2,15 @@ use crate::server::protocol::{
     DebugMessage, DebugRequest, DebugResponse, PROTOCOL_MAX_VERSION, PROTOCOL_MIN_VERSION,
 };
 use crate::{DebuggerError, Result};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::info;
+
+use rustls::client::ServerName;
+use rustls::{Certificate, ClientConfig, PrivateKey, RootCertStore};
 
 #[derive(Debug, Clone)]
 pub struct RequestTimeouts {
@@ -43,12 +48,28 @@ impl Default for RetryPolicy {
     }
 }
 
-#[derive(Debug, Clone, Default)]
 pub struct RemoteClientConfig {
     pub timeouts: RequestTimeouts,
     pub retry: RetryPolicy,
     pub heartbeat_interval_ms: Option<u32>,
     pub idle_timeout_ms: Option<u32>,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
+    pub tls_ca: Option<PathBuf>,
+}
+
+impl Default for RemoteClientConfig {
+    fn default() -> Self {
+        Self {
+            timeouts: RequestTimeouts::default(),
+            retry: RetryPolicy::default(),
+            heartbeat_interval_ms: None,
+            idle_timeout_ms: None,
+            tls_cert: None,
+            tls_key: None,
+            tls_ca: None,
+        }
+    }
 }
 
 /// Remote client for connecting to a debug server
@@ -56,10 +77,57 @@ pub struct RemoteClientConfig {
 pub struct RemoteClient {
     addr: String,
     token: Option<String>,
-    stream: BufReader<TcpStream>,
+    stream: BufReader<RemoteStream>,
     message_id: u64,
     authenticated: bool,
     config: RemoteClientConfig,
+}
+
+#[derive(Debug)]
+enum RemoteStream {
+    Plain(TcpStream),
+    Tls(rustls::StreamOwned<rustls::client::ClientConnection, TcpStream>),
+}
+
+impl Read for RemoteStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.read(buf),
+            Self::Tls(s) => s.read(buf),
+        }
+    }
+}
+
+impl Write for RemoteStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Plain(s) => s.write(buf),
+            Self::Tls(s) => s.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(s) => s.flush(),
+            Self::Tls(s) => s.flush(),
+        }
+    }
+}
+
+impl RemoteStream {
+    fn set_read_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Plain(s) => s.set_read_timeout(timeout),
+            Self::Tls(s) => s.get_ref().set_read_timeout(timeout),
+        }
+    }
+
+    fn set_write_timeout(&self, timeout: Option<Duration>) -> std::io::Result<()> {
+        match self {
+            Self::Plain(s) => s.set_write_timeout(timeout),
+            Self::Tls(s) => s.get_ref().set_write_timeout(timeout),
+        }
+    }
 }
 
 impl RemoteClient {
@@ -74,9 +142,7 @@ impl RemoteClient {
         config: RemoteClientConfig,
     ) -> Result<Self> {
         info!("Connecting to debug server at {}", addr);
-        let stream = TcpStream::connect(addr).map_err(|e| {
-            DebuggerError::NetworkError(format!("Failed to connect to {}: {}", addr, e))
-        })?;
+        let stream = Self::create_stream(addr, &config)?;
 
         let mut client = Self {
             addr: addr.to_string(),
@@ -96,6 +162,85 @@ impl RemoteClient {
 
         Ok(client)
     }
+
+    fn create_stream(addr: &str, config: &RemoteClientConfig) -> Result<RemoteStream> {
+        let tcp_stream = TcpStream::connect(addr).map_err(|e| {
+            DebuggerError::NetworkError(format!("Failed to connect to {}: {}", addr, e))
+        })?;
+
+        if config.tls_cert.is_some() || config.tls_key.is_some() || config.tls_ca.is_some() {
+            let mut root_store = RootCertStore::empty();
+            if let Some(ref ca_path) = config.tls_ca {
+                let ca_file = std::fs::File::open(ca_path).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to open CA cert {:?}: {}", ca_path, e))
+                })?;
+                let mut reader = BufReader::new(ca_file);
+                let certs = rustls_pemfile::certs(&mut reader).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to parse CA cert {:?}: {}", ca_path, e))
+                })?;
+                for cert in certs {
+                    root_store.add(&Certificate(cert)).map_err(|e| {
+                        DebuggerError::FileError(format!("Failed to add cert to root store: {}", e))
+                    })?;
+                }
+            } else {
+                // Use native certs if no CA is provided
+                for cert in rustls_native_certs::load_native_certs().map_err(|e| {
+                    DebuggerError::NetworkError(format!("Failed to load native certs: {}", e))
+                })? {
+                    root_store.add(&Certificate(cert.0)).map_err(|e| {
+                        DebuggerError::FileError(format!("Failed to add native cert to root store: {}", e))
+                    })?;
+                }
+            }
+
+            let mut client_config = ClientConfig::builder()
+                .with_safe_defaults()
+                .with_root_certificates(root_store);
+
+            if let (Some(ref cert_path), Some(ref key_path)) = (&config.tls_cert, &config.tls_key) {
+                let cert_file = std::fs::File::open(cert_path).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to open client cert {:?}: {}", cert_path, e))
+                })?;
+                let mut cert_reader = BufReader::new(cert_file);
+                let certs = rustls_pemfile::certs(&mut cert_reader)
+                    .map_err(|e| DebuggerError::FileError(format!("Failed to parse client cert: {}", e)))?
+                    .into_iter()
+                    .map(Certificate)
+                    .collect();
+
+                let key_file = std::fs::File::open(key_path).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to open client key {:?}: {}", key_path, e))
+                })?;
+                let mut key_reader = BufReader::new(key_file);
+                let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
+                    .map_err(|e| DebuggerError::FileError(format!("Failed to parse client key: {}", e)))?;
+                
+                if let Some(key) = keys.into_iter().next() {
+                    client_config = client_config.with_client_auth_cert(certs, PrivateKey(key)).map_err(|e| {
+                        DebuggerError::FileError(format!("Failed to set client certificate: {}", e))
+                    })?;
+                }
+            } else {
+                client_config = client_config.with_no_client_auth();
+            }
+
+            let host = addr.split(':').next().unwrap_or("localhost");
+            let server_name = ServerName::try_from(host).map_err(|e| {
+                DebuggerError::NetworkError(format!("Invalid server name '{}': {}", host, e))
+            })?;
+
+            let conn = rustls::client::ClientConnection::new(Arc::new(client_config), server_name).map_err(|e| {
+                DebuggerError::NetworkError(format!("Failed to create TLS connection: {}", e))
+            })?;
+
+            Ok(RemoteStream::Tls(rustls::StreamOwned::new(conn, tcp_stream)))
+        } else {
+            Ok(RemoteStream::Plain(tcp_stream))
+        }
+    }
+
+
 
     /// Perform a protocol handshake and verify compatibility.
     pub fn handshake(&mut self, client_name: &str, client_version: &str) -> Result<u32> {
@@ -482,9 +627,7 @@ impl RemoteClient {
     }
 
     fn reconnect(&mut self) -> Result<()> {
-        let stream = TcpStream::connect(&self.addr).map_err(|e| {
-            DebuggerError::NetworkError(format!("Failed to reconnect to {}: {}", self.addr, e))
-        })?;
+        let stream = Self::create_stream(&self.addr, &self.config)?;
         self.stream = BufReader::new(stream);
         self.authenticated = self.token.is_none();
 

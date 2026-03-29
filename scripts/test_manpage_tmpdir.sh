@@ -1,129 +1,107 @@
 #!/usr/bin/env bash
-# Test script to validate check_manpages.sh portability across TMPDIR configurations.
+# Behavioral tests for scripts/check_manpages.sh.
 #
-# Usage: bash scripts/test_manpage_tmpdir.sh
+# Uses a temporary fake repo and a stub cargo binary to run check_manpages.sh
+# in full isolation.  Tests:
+#   1. Tmpdir is created inside the controlled $TMPDIR and cleaned up on exit.
+#   2. README option drift check passes when all documented options exist in
+#      the committed man pages.
+#   3. README option drift check exits non-zero when README documents an option
+#      absent from every man page.
 #
-# This script validates that check_manpages.sh:
-#   - Respects explicit TMPDIR environment variable
-#   - Falls back to standard locations when TMPDIR is unset
-#   - Reports clear errors when no temp directory is writable
-#   - Is portable across BSD/macOS and Linux platforms
+# Mirrors the isolation pattern used by scripts/test_benchmark_regressions.sh.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$SCRIPT_DIR/.."
-RESULTS_FILE="/tmp/manpage_tmpdir_test_results_$RANDOM.txt"
+SOURCE_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check_manpages.sh"
+TEST_ROOT="$(mktemp -d)"
+REPO_ROOT="$TEST_ROOT/repo"
+BIN_DIR="$TEST_ROOT/bin"
+CUSTOM_TMPDIR="$TEST_ROOT/tmp"
 
-# Color codes for output
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-NC='\033[0m'
+cleanup() { rm -rf "$TEST_ROOT"; }
+trap cleanup EXIT
 
-test_count=0
-pass_count=0
-fail_count=0
+mkdir -p "$REPO_ROOT/scripts" "$REPO_ROOT/man/man1" "$BIN_DIR" "$CUSTOM_TMPDIR"
+cp "$SOURCE_SCRIPT" "$REPO_ROOT/scripts/check_manpages.sh"
+chmod +x "$REPO_ROOT/scripts/check_manpages.sh"
 
-print_result() {
-    local status="$1"
-    local message="$2"
-    test_count=$((test_count + 1))
-    
-    if [[ "$status" == "PASS" ]]; then
-        echo -e "${GREEN}✓ PASS${NC}: $message"
-        pass_count=$((pass_count + 1))
-    else
-        echo -e "${RED}✗ FAIL${NC}: $message"
-        fail_count=$((fail_count + 1))
-    fi
-}
+# Minimal roff man page with --contract and --function.
+# The \fB\-\-option\fR encoding mirrors what clap_mangen generates.
+cat > "$REPO_ROOT/man/man1/soroban-debug-run.1" <<'EOF'
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH run 1
+.SH OPTIONS
+.TP
+\fB\-c\fR, \fB\-\-contract\fR \fI<FILE>\fR
+Path to the contract WASM file
+.TP
+\fB\-f\fR, \fB\-\-function\fR \fI<FUNCTION>\fR
+Function name to execute
+EOF
 
-echo "Testing check_manpages.sh portability..."
-echo ""
-
-# Test 1: Run with default TMPDIR (unset)
-echo "Test 1: Running with default TMPDIR (unset)..."
-(
-    cd "$REPO_ROOT"
-    unset TMPDIR || true
-    if bash scripts/check_manpages.sh >/dev/null 2>&1; then
-        print_result "PASS" "check_manpages.sh run successfully with default TMPDIR"
-    else
-        exit_code=$?
-        if [[ $exit_code -eq 1 ]]; then
-            print_result "PASS" "check_manpages.sh correctly reported man page drift (exit code 1)"
-        else
-            print_result "FAIL" "check_manpages.sh exited with unexpected code $exit_code"
-        fi
-    fi
-)
-
-# Test 2: Run with explicit TMPDIR=/tmp
-echo ""
-echo "Test 2: Running with TMPDIR=/tmp..."
-(
-    cd "$REPO_ROOT"
-    if TMPDIR=/tmp bash scripts/check_manpages.sh >/dev/null 2>&1; then
-        print_result "PASS" "check_manpages.sh runs successfully with TMPDIR=/tmp"
-    else
-        exit_code=$?
-        if [[ $exit_code -eq 1 ]]; then
-            print_result "PASS" "check_manpages.sh correctly reported man page drift (exit code 1)"
-        else
-            print_result "FAIL" "check_manpages.sh exited with unexpected code $exit_code"
-        fi
-    fi
-)
-
-# Test 3: Run with DEBUG=1 to verify debug output works
-echo ""
-echo "Test 3: Running with DEBUG=1 to verify diagnostic output..."
-(
-    cd "$REPO_ROOT"
-    output=$(DEBUG=1 TMPDIR=/tmp bash scripts/check_manpages.sh 2>&1 || true)
-    if echo "$output" | grep -q "DEBUG"; then
-        print_result "PASS" "Debug output is produced when DEBUG=1"
-    else
-        print_result "FAIL" "Debug output not found when DEBUG=1"
-    fi
-)
-
-# Test 4: Verify Makefile target works with TMPDIR override
-echo ""
-echo "Test 4: Testing Makefile check-man target with TMPDIR=/tmp..."
-(
-    cd "$REPO_ROOT"
-    if TMPDIR=/tmp make check-man >/dev/null 2>&1; then
-        print_result "PASS" "make check-man runs successfully with TMPDIR=/tmp"
-    else
-        exit_code=$?
-        if [[ $exit_code -eq 1 ]]; then
-            print_result "PASS" "make check-man correctly reported man page drift"
-        else
-            print_result "FAIL" "make check-man exited with unexpected code $exit_code"
-        fi
-    fi
-)
-
-# Summary
-echo ""
-echo "======================================"
-echo "Test Results"
-echo "======================================"
-echo "Total:  $test_count"
-echo -e "${GREEN}Passed: $pass_count${NC}"
-if [[ $fail_count -gt 0 ]]; then
-    echo -e "${RED}Failed: $fail_count${NC}"
-else
-    echo -e "${GREEN}Failed: $fail_count${NC}"
+# Fake cargo: copies committed man pages into MAN_OUT_DIR, simulating a clean
+# build where man page content has not changed.
+cat > "$BIN_DIR/cargo" <<FAKECARGO
+#!/usr/bin/env bash
+set -euo pipefail
+if [ -n "\${MAN_OUT_DIR:-}" ]; then
+    mkdir -p "\$MAN_OUT_DIR"
+    cp "$REPO_ROOT/man/man1/"*.1 "\$MAN_OUT_DIR/"
 fi
-echo ""
+FAKECARGO
+chmod +x "$BIN_DIR/cargo"
 
-if [[ $fail_count -eq 0 ]]; then
-    echo -e "${GREEN}✓ All portability tests passed!${NC}"
-    exit 0
-else
-    echo -e "${RED}✗ Some tests failed.${NC}"
+export PATH="$BIN_DIR:$PATH"
+export TMPDIR="$CUSTOM_TMPDIR"
+unset DEBUG 2>/dev/null || true
+
+# ── Test 1: tmpdir is created inside $TMPDIR and cleaned up after exit ───────
+
+cat > "$REPO_ROOT/README.md" <<'EOF'
+## Run Command
+
+Options:
+  -c, --contract <FILE>   Path to the WASM file
+  -f, --function <NAME>   Function name
+EOF
+
+bash "$REPO_ROOT/scripts/check_manpages.sh" > /dev/null
+
+leftover=$(find "$CUSTOM_TMPDIR" -mindepth 1 -maxdepth 1 -name 'check_manpages.*' 2>/dev/null \
+    | wc -l | tr -d ' ')
+if [ "$leftover" -ne 0 ]; then
+    echo "FAIL: check_manpages.sh did not clean up its tmpdir after a successful run" >&2
     exit 1
 fi
+
+echo "PASS: tmpdir is created in TMPDIR and cleaned up on exit"
+
+# ── Test 2: README with only known options passes ────────────────────────────
+# Reuse the README from test 1 — it only contains --contract and --function,
+# both of which are in the fake man page above.
+
+bash "$REPO_ROOT/scripts/check_manpages.sh" > /dev/null
+
+echo "PASS: README drift check passes when all options exist in man pages"
+
+# ── Test 3: README with an unknown option causes failure ─────────────────────
+
+cat > "$REPO_ROOT/README.md" <<'EOF'
+## Run Command
+
+Options:
+  -c, --contract <FILE>   Path to the WASM file
+  --watch               Watch the WASM file for changes
+EOF
+
+if bash "$REPO_ROOT/scripts/check_manpages.sh" > /dev/null 2>&1; then
+    echo "FAIL: expected check_manpages.sh to exit non-zero for --watch drift" >&2
+    exit 1
+fi
+
+echo "PASS: README drift check exits non-zero when README documents an unknown option"
+
+echo ""
+echo "All check_manpages.sh behavioral tests passed."

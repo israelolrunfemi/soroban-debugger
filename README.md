@@ -56,6 +56,19 @@ man soroban-debug
 man soroban-debug-run
 ```
 
+## CI / Developer Makefile Targets
+
+For sandbox or restricted CI environments where socket bind may fail, use:
+
+```bash
+make ci-sandbox
+```
+
+This target runs formatting, lint, non-network tests, VS Code tests, and man-page checks while skipping loopback TCP network-dependent tests.
+
+- `make test-rust-sandbox`: Run Rust tests excluding `parity_dap_server*` tests.
+- `make test-rust-network`: Run only network-dependent parity server tests.
+
 ## Quick Start
 
 ### Basic Usage
@@ -131,7 +144,6 @@ Options:
   -b, --breakpoint <NAME>   Set breakpoint at function name
       --storage-filter <PATTERN>  Filter storage by key pattern (repeatable)
   --batch-args <FILE>   Path to JSON file with array of argument sets for batch execution
-  --watch               Watch the WASM file for changes and automatically re-run
   --server              Start a remote debug server instead of executing locally
 ```
 
@@ -181,20 +193,6 @@ Generated tests are self-contained and use the Soroban test SDK.
 Options:
   --generate-test <FILE>  Write generated test to the specified file
   --overwrite             Overwrite the test file if it already exists (default: append)
-
-### Watch Mode
-
-Automatically reload and re-run when the WASM file changes:
-
-```bash
-soroban-debug run \
-  --contract target/wasm32-unknown-unknown/release/my_contract.wasm \
-  --function transfer \
-  --args '["user1", "user2", 100]' \
-  --watch
-```
-
-Perfect for development - edit your contract, rebuild, and see results immediately. See [docs/watch-mode.md](https://github.com/Timi16/soroban-debugger/blob/main/docs/watch-mode.md) for details.
 
 ### Batch Execution
 
@@ -396,7 +394,7 @@ You can export a full record of the contract execution to a JSON file using the 
 
 ```bash
 soroban-debug run \
-  --wasm contract.wasm \
+  --contract contract.wasm \
   --function hello \
   --trace-output execution_trace.json
 ```

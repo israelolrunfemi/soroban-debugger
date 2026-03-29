@@ -10,7 +10,7 @@ import {
   getDebuggerVersionInfo,
   validateLaunchConfig,
 } from "../cli/debuggerProcess";
-import { resolveSourceBreakpoints } from "../dap/sourceBreakpoints";
+import { resolveSourceBreakpoints, shouldPromoteToFunctionBreakpoint } from "../dap/sourceBreakpoints";
 import { VariableStore } from "../dap/variableStore";
 import { DapClient } from "./dapClient";
 
@@ -280,6 +280,34 @@ export async function runSmokeSuite(): Promise<void> {
     /Remediation:/,
     "Expected protocol mismatch message to include remediation guidance",
   );
+
+  {
+    // Validate identical promotion logic for identical inputs
+    const testCases: Array<{
+      verified: boolean;
+      functionName?: string;
+      reasonCode?: string;
+      expected: boolean;
+    }> = [
+      { verified: true, functionName: "test", expected: true },
+      { verified: true, functionName: undefined, expected: false },
+      { verified: false, functionName: "test", expected: false },
+      { verified: false, functionName: "test", reasonCode: "HEURISTIC_NOT_EXPORTED", expected: false },
+      { verified: false, functionName: "test", reasonCode: "HEURISTIC_REANCHORED", expected: true },
+      { verified: false, functionName: "test", reasonCode: "HEURISTIC_NO_DWARF", expected: true },
+      { verified: false, functionName: undefined, reasonCode: "HEURISTIC_NO_FUNCTION", expected: false },
+    ];
+
+    for (const testCase of testCases) {
+      const result = shouldPromoteToFunctionBreakpoint(testCase.verified, testCase.functionName, testCase.reasonCode);
+      assert.strictEqual(
+        result,
+        testCase.expected,
+        `Expected shouldPromoteToFunctionBreakpoint(${testCase.verified}, '${testCase.functionName}', '${testCase.reasonCode}') to be ${testCase.expected}`,
+      );
+    }
+    console.log("Breakpoint promotion identical decision unit tests passed");
+  }
 
   await assertPerRequestTimeoutBehavior();
 

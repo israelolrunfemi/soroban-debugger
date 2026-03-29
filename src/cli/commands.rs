@@ -658,20 +658,10 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
 
     let mut engine = DebuggerEngine::new(executor, args.breakpoint.clone());
 
-    // Server mode is handled at the beginning of the function
-    // Remote mode is not yet implemented
-
-    if args.remote.is_some() {
-        return Err(DebuggerError::ExecutionError(
-            "Remote mode not yet implemented in run command".to_string(),
-        )
-        .into());
-    }
-
     // Execute locally with debugging
-    if !args.is_json_output() {
-        println!("\n--- Execution Start ---\n");
-    }
+    // if !args.is_json_output() {
+    //     println!("\n--- Execution Start ---\n");
+    // }
     if args.instruction_debug {
         print_info("Enabling instruction-level debugging...");
         engine.enable_instruction_debug(&wasm_bytes)?;
@@ -687,7 +677,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             return Ok(());
         }
     }
-
+    
     print_info("\n--- Execution Start ---\n");
     output_writer.write("\n--- Execution Start ---\n")?;
     let storage_before = engine.executor().get_storage_snapshot()?;
@@ -1853,6 +1843,8 @@ pub fn server(args: ServerArgs) -> Result<()> {
         args.token.clone(),
         args.tls_cert.as_deref(),
         args.tls_key.as_deref(),
+        args.repeat,
+        args.storage_filter,
     )?;
 
     tokio::runtime::Runtime::new()
@@ -1863,7 +1855,11 @@ pub fn server(args: ServerArgs) -> Result<()> {
 /// Connect to remote debug server
 pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
     print_info(format!("Connecting to remote debugger at {}", args.remote));
-    let mut client = crate::client::RemoteClient::connect(&args.remote, args.token.clone())?;
+    let mut config = crate::client::RemoteClientConfig::default();
+    config.tls_cert = args.tls_cert.clone();
+    config.tls_key = args.tls_key.clone();
+    config.tls_ca = args.tls_ca.clone();
+    let mut client = crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));
