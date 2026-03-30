@@ -515,12 +515,14 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
     // Start debug server if requested
     if args.server {
         return server(ServerArgs {
+            host: args.host,
             port: args.port,
             token: args.token,
             tls_cert: args.tls_cert,
             tls_key: args.tls_key,
             repeat: args.repeat,
             storage_filter: args.storage_filter,
+            storage_filter: Vec::new(),
         });
     }
 
@@ -1821,8 +1823,8 @@ pub fn replay(args: ReplayArgs, verbosity: Verbosity) -> Result<()> {
 /// Start debug server for remote connections
 pub fn server(args: ServerArgs) -> Result<()> {
     print_info(format!(
-        "Starting remote debug server on port {}",
-        args.port
+        "Starting remote debug server on {}:{}",
+        args.host, args.port
     ));
     if let Some(token) = &args.token {
         print_info("Token authentication enabled");
@@ -1845,6 +1847,7 @@ pub fn server(args: ServerArgs) -> Result<()> {
     }
 
     let server = crate::server::DebugServer::new(
+        args.host.clone(),
         args.token.clone(),
         args.tls_cert.as_deref(),
         args.tls_key.as_deref(),
