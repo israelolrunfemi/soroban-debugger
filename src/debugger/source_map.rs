@@ -765,7 +765,7 @@ impl SourceMap {
                 SourceBreakpointResolution {
                     requested_line: *requested_line,
                     line: resolved_line,
-                    verified: true,
+                    verified: !adjusted,
                     function: Some(function.clone()),
                     reason_code: if adjusted {
                         "ADJUSTED".to_string()
@@ -773,7 +773,10 @@ impl SourceMap {
                         "OK".to_string()
                     },
                     message: if adjusted {
-                        format!("Adjusted to line {} and mapped to entrypoint '{}'.", resolved_line, function)
+                        format!(
+                            "Requested line is not executable; adjusted to executable line {} in entrypoint '{}'.",
+                            resolved_line, function
+                        )
                     } else {
                         format!("Mapped to entrypoint '{}'.", function)
                     },

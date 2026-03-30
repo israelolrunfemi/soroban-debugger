@@ -6,7 +6,6 @@ import {
   WIRE_PROTOCOL_MAX_VERSION,
   WIRE_PROTOCOL_MIN_VERSION,
 } from "../dap/protocol";
-import { shouldPromoteToFunctionBreakpoint } from "../dap/sourceBreakpoints";
 import { LogManager, LogLevel, LogPhase } from "../debug/logManager";
 
 export interface DebuggerProcessConfig {
@@ -23,6 +22,7 @@ export interface DebuggerProcessConfig {
    */
   host?: string;
   token?: string;
+  dryRun?: boolean;
   requestTimeoutMs?: number;
   connectTimeoutMs?: number;
   /**
@@ -746,6 +746,7 @@ export class DebuggerProcess {
       functionName?: string;
       reasonCode: string;
       message: string;
+      setBreakpoint?: boolean;
     }>
   > {
     const response = await this.sendRequest(
@@ -767,7 +768,7 @@ export class DebuggerProcess {
       functionName: bp.function,
       reasonCode: bp.reason_code,
       message: bp.message,
-      setBreakpoint: shouldPromoteToFunctionBreakpoint(bp.verified, bp.function, bp.reason_code),
+      setBreakpoint: Boolean(bp.verified && bp.function),
     }));
   }
 
