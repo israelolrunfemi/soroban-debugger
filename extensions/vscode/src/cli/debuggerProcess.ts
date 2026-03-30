@@ -828,6 +828,10 @@ export class DebuggerProcess {
       args.push("--token", this.config.token);
     }
 
+    if (this.config.dryRun) {
+      args.push("--dry-run");
+    }
+
     if (this.config.storageFilter && this.config.storageFilter.length > 0) {
       for (const filter of this.config.storageFilter) {
         args.push("--storage-filter", filter);

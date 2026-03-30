@@ -140,7 +140,7 @@ For VS Code users, this table maps CLI flags to their `launch.json` equivalents.
 | `--export-storage` | (none) | NO |
 | `--show-events` | (none) | NO |
 | `--event-filter` | (none) | NO |
-| `--dry-run` | (none) | NO |
+| `--dry-run` | `dryRun` | YES |
 | `--mock` | (none) | NO |
 
 ---

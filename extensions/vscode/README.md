@@ -247,7 +247,7 @@ The following features are **not available** in the extension.
 | Storage export              | `--export-storage <file>`                                                                      | Use `soroban-debug run --export-storage` in a terminal                 |
 | Storage import              | `--import-storage <file>`                                                                      | Use `snapshotPath` in `launch.json` for initial state                  |
 | Event display and filtering | `--show-events`, `--event-filter`                                                              | Use `soroban-debug run --show-events` in a terminal                    |
-| Dry-run mode                | `--dry-run`                                                                                    | Use `soroban-debug run --dry-run` in a terminal                        |
+| Dry-run mode                | `--dry-run`                                                                                    | Use `dryRun: true` in `launch.json`                                    |
 | Cross-contract mocking      | `--mock CONTRACT.fn=value`                                                                     | Use `soroban-debug run --mock` in a terminal                           |
 | Conditional breakpoints     | (not in CLI either)                                                                            | Not supported on either surface                                        |
 | Hit-count conditions        | (not in CLI either)                                                                            | Not supported on either surface                                        |
