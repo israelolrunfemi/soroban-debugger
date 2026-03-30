@@ -153,6 +153,15 @@ impl StorageInspector {
         }
     }
 
+    /// Create a StorageInspector from an existing storage snapshot
+    pub fn with_state(storage: HashMap<String, String>) -> Self {
+        Self {
+            storage,
+            reads: HashMap::new(),
+            writes: HashMap::new(),
+        }
+    }
+
     /// Get all storage entries
     pub fn get_all(&self) -> &HashMap<String, String> {
         &self.storage
@@ -351,6 +360,20 @@ impl StorageInspector {
         crate::logging::log_display("", crate::logging::LogLevel::Info);
     }
 
+    /// Sync access tracking from DebugEnv
+    pub fn sync_from_debug_env(&mut self, debug_env: &crate::runtime::env::DebugEnv) {
+        for access in debug_env.storage_accesses() {
+            match &access.access_type {
+                crate::runtime::env::StorageAccessType::Read => {
+                    self.track_read(&access.key);
+                }
+                crate::runtime::env::StorageAccessType::Write => {
+                    self.track_write(&access.key);
+                }
+            }
+        }
+    }
+
     /// Capture a snapshot of all storage entries from the host
     pub fn capture_snapshot(host: &Host) -> HashMap<String, String> {
         match host.with_mut_storage(|storage| {
@@ -513,7 +536,7 @@ impl StorageInspector {
 }
 
 /// Represents the differences between two storage states
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct StorageDiff {
     pub added: HashMap<String, String>,
     pub modified: HashMap<String, (String, String)>,
@@ -867,5 +890,93 @@ mod tests {
         inspector.track_read("user:bob:balance");
 
         inspector.display_access_report();
+    }
+
+    #[test]
+    fn test_storage_diff_empty_before_empty_after() {
+        let before: HashMap<String, String> = HashMap::new();
+        let after: HashMap<String, String> = HashMap::new();
+        let diff = StorageInspector::compute_diff(&before, &after, &[]);
+        assert!(diff.is_empty());
+        assert!(diff.added.is_empty());
+        assert!(diff.modified.is_empty());
+        assert!(diff.deleted.is_empty());
+        assert!(diff.triggered_alerts.is_empty());
+    }
+
+    #[test]
+    fn test_storage_diff_large_mixed_changes() {
+        let mut before = HashMap::new();
+        let mut after = HashMap::new();
+
+        // 1-50: unchanged
+        for i in 1..=50 {
+            let k = format!("key_{}", i);
+            let v = format!("val_{}", i);
+            before.insert(k.clone(), v.clone());
+            after.insert(k, v);
+        }
+
+        // 51-75: modified
+        for i in 51..=75 {
+            before.insert(format!("key_{}", i), "old".to_string());
+            after.insert(format!("key_{}", i), "new".to_string());
+        }
+
+        // 76-100: deleted
+        for i in 76..=100 {
+            before.insert(format!("key_{}", i), "gone".to_string());
+        }
+
+        // 101-125: added
+        for i in 101..=125 {
+            after.insert(format!("key_{}", i), "fresh".to_string());
+        }
+
+        let diff = StorageInspector::compute_diff(&before, &after, &[]);
+        assert_eq!(diff.added.len(), 25);
+        assert_eq!(diff.modified.len(), 25);
+        assert_eq!(diff.deleted.len(), 25);
+
+        // Verify a specific one of each
+        assert_eq!(diff.added.get("key_101").unwrap(), "fresh");
+        assert_eq!(
+            diff.modified.get("key_51").unwrap(),
+            &("old".to_string(), "new".to_string())
+        );
+        assert!(diff.deleted.contains(&"key_76".to_string()));
+    }
+
+    #[test]
+    fn test_storage_diff_binary_non_utf8_values() {
+        let mut before = HashMap::new();
+        let mut after = HashMap::new();
+
+        // Use strings that contain potentially problematic byte sequences
+        // Note: Rust String is UTF-8, but we can store raw bytes as escaped characters
+        // or just use arbitrary valid UTF-8 that looks like binary (e.g. including nulls or high-bit chars)
+        let binary_val1 = "val\x00\u{FFFF}\u{FFFE}".to_string();
+        let binary_val2 = "val\x01\x02\x03".to_string();
+        let emoji_key = "🔑".to_string();
+
+        before.insert(emoji_key.clone(), binary_val1.clone());
+        after.insert(emoji_key.clone(), binary_val2.clone());
+
+        let binary_key_added = "key\x00bin".to_string();
+        after.insert(binary_key_added.clone(), "some_val".to_string());
+
+        let diff = StorageInspector::compute_diff(&before, &after, &[]);
+
+        assert_eq!(
+            diff.added.get(&binary_key_added).unwrap(),
+            &"some_val".to_string()
+        );
+        assert_eq!(
+            diff.modified.get(&emoji_key).unwrap(),
+            &(binary_val1, binary_val2)
+        );
+
+        // Ensure display_diff doesn't panic with these values
+        StorageInspector::display_diff(&diff);
     }
 }

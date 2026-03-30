@@ -144,6 +144,106 @@ impl DebuggerEngine {
             source_map: None,
             paused: false,
             ) -> Result<String> {
+            instruction_debug_enabled: false,
+        }
+    }
+
+    /// Best-effort DWARF source map loading.
+    ///
+    /// Missing or malformed debug information does not fail execution; it simply leaves the
+    /// engine without source mappings.
+    ///
+    /// The existing `SourceMap` instance is **reused** across calls so that its
+    /// internal parse cache is preserved.  If the WASM bytes have not changed
+    /// since the last load, the DWARF sections are not re-parsed.
+    pub fn try_load_source_map(&mut self, wasm_bytes: &[u8]) {
+        // Reuse the existing instance to keep the hash-based parse cache alive.
+        let mut source_map = self.source_map.take().unwrap_or_default();
+        match source_map.load(wasm_bytes) {
+            Ok(()) => {
+                self.source_map = Some(source_map);
+            }
+            Err(_) => {
+                self.source_map = None;
+            }
+        }
+    }
+
+    pub fn source_map(&self) -> Option<&SourceMap> {
+        self.source_map.as_ref()
+    }
+
+    pub fn source_map_mut(&mut self) -> Option<&mut SourceMap> {
+        self.source_map.as_mut()
+    }
+
+    pub fn lookup_source_location(&self, wasm_offset: usize) -> Option<SourceLocation> {
+        self.source_map.as_ref()?.lookup(wasm_offset)
+    }
+
+    /// Enable instruction-level debugging.
+    pub fn enable_instruction_debug(&mut self, wasm_bytes: &[u8]) -> Result<()> {
+        self.try_load_source_map(wasm_bytes);
+
+        let instructions = self
+            .instrumenter
+            .parse_instructions(wasm_bytes)
+            .map_err(|e| miette::miette!("Failed to parse instructions: {}", e))?
+            .to_vec();
+
+        if let Ok(mut state) = self.state.lock() {
+            state.set_instructions(instructions);
+            state.enable_instruction_debug();
+        }
+
+        self.instrumenter.enable();
+        self.instruction_debug_enabled = true;
+        Ok(())
+    }
+
+    pub fn load_source_map(&mut self, wasm_bytes: &[u8]) -> Result<()> {
+        // Reuse the existing instance to keep the hash-based parse cache alive.
+        let mut source_map = self.source_map.take().unwrap_or_default();
+        source_map.load(wasm_bytes)?;
+        self.source_map = Some(source_map);
+        Ok(())
+    }
+
+    /// Disable instruction-level debugging.
+    pub fn disable_instruction_debug(&mut self) {
+        self.instrumenter.disable();
+        self.instrumenter.remove_hook();
+        if let Ok(mut state) = self.state.lock() {
+            state.disable_instruction_debug();
+        }
+        self.instruction_debug_enabled = false;
+    }
+
+    /// Check if instruction-level debugging is enabled.
+    pub fn is_instruction_debug_enabled(&self) -> bool {
+        self.instruction_debug_enabled
+    }
+
+    /// Execute a contract function with debugging.
+    #[tracing::instrument(skip(self), fields(function = function))]
+    pub fn execute(&mut self, function: &str, args: Option<&str>) -> Result<String> {
+        self.execute_internal(function, args, true)
+    }
+
+    pub fn execute_without_breakpoints(
+        &mut self,
+        function: &str,
+        args: Option<&str>,
+    ) -> Result<String> {
+        self.execute_internal(function, args, false)
+    }
+
+    fn execute_internal(
+        &mut self,
+        function: &str,
+        args: Option<&str>,
+        check_breakpoints: bool,
+    ) -> Result<String> {
         info!("Executing function: {}", function);
         self.paused = false;
 
@@ -184,6 +284,17 @@ impl DebuggerEngine {
                     .breakpoints()
                     .get_breakpoint(function)
                     .and_then(|bp| bp.condition.clone());
+        let (step_count, current_args) = self
+            .state
+            .lock()
+            .map(|s| (s.step_count(), s.current_args().map(String::from)))
+            .unwrap_or((0, None));
+
+        if check_breakpoints {
+            if let Some(bp) = self.breakpoints().get_breakpoint(function) {
+                let condition = bp.condition.clone();
+                let _ = step_count;
+                let _ = current_args;
                 self.pause_at_function(function, condition);
             }
         }
@@ -197,6 +308,173 @@ impl DebuggerEngine {
         let event_result = match &result {
             Ok(output) => Ok(output.clone()),
             Err(e) => Err(e.to_string()),
+        };
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::AfterFunctionCall {
+                function: function.to_string(),
+                result: event_result,
+                duration,
+            },
+            &mut plugin_ctx,
+        );
+
+        if let Err(ref e) = result {
+            tracing::error!("Execution failed: {}", e);
+            if let Ok(state) = self.state.lock() {
+                state.call_stack().display();
+            }
+        } else if self.is_paused() {
+            if let Ok(state) = self.state.lock() {
+                state.call_stack().display();
+            }
+        }
+
+        result
+    }
+
+    pub fn prepare_breakpoint_stop(&mut self, function: &str, args: Option<&str>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.set_current_function(function.to_string(), args.map(str::to_string));
+            state.call_stack_mut().clear();
+            state.call_stack_mut().push(function.to_string(), None);
+        }
+
+        crate::logging::log_breakpoint(function);
+        self.paused = true;
+
+        let mut plugin_ctx = EventContext::new();
+        plugin_ctx.stack_depth = 1;
+        plugin_ctx.is_paused = true;
+        let condition = self
+            .breakpoints
+            .get_breakpoint(function)
+            .and_then(|bp| bp.condition.as_ref().map(|c| format!("{:?}", c)));
+
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::BreakpointHit {
+                function: function.to_string(),
+                condition,
+            },
+            &mut plugin_ctx,
+        );
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::ExecutionPaused {
+                reason: "breakpoint".to_string(),
+            },
+            &mut plugin_ctx,
+        );
+    }
+
+    /// Stage an execution so the debugger starts in a paused state without
+    /// emitting a breakpoint log event.
+    pub fn stage_execution(&mut self, function: &str, args: Option<&str>) {
+        if let Ok(mut state) = self.state.lock() {
+            state.set_current_function(function.to_string(), args.map(str::to_string));
+            state.call_stack_mut().clear();
+            state.call_stack_mut().push(function.to_string(), None);
+        }
+
+        self.paused = true;
+    }
+
+    fn update_call_stack(&mut self, total_duration: std::time::Duration) -> Result<()> {
+        let events = self.executor.get_diagnostic_events()?;
+
+        let current_func = if let Ok(state) = self.state.lock() {
+            state.current_function().unwrap_or("entry").to_string()
+        } else {
+            "entry".to_string()
+        };
+
+        if let Ok(mut state) = self.state.lock() {
+            let stack = state.call_stack_mut();
+            stack.clear();
+            stack.push(current_func, None);
+
+            for event in events {
+                let event_str = format!("{:?}", event);
+                if event_str.contains("ContractCall")
+                    || (event_str.contains("call") && event.contract_id.is_some())
+                {
+                    let contract_id = event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
+                    stack.push("nested_call".to_string(), contract_id);
+                } else if (event_str.contains("ContractReturn") || event_str.contains("return"))
+                    && stack.get_stack().len() > 1
+                {
+                    stack.pop();
+                }
+            }
+
+            if let Some(mut frame) = stack.pop() {
+                frame.duration = Some(total_duration);
+                stack.push_frame(frame);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Step into next instruction.
+    pub fn step_into(&mut self) -> Result<bool> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
+
+        let stepped = if let Ok(mut state) = self.state.lock() {
+            self.stepper.step_into(&mut state)
+        } else {
+            false
+        };
+        self.paused = stepped;
+        Ok(stepped)
+    }
+
+    /// Step over function calls.
+    pub fn step_over(&mut self) -> Result<bool> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
+
+        let stepped = if let Ok(mut state) = self.state.lock() {
+            self.stepper.step_over(&mut state)
+        } else {
+            false
+        };
+        self.paused = stepped;
+        Ok(stepped)
+    }
+
+    pub fn step_over_source_line(&mut self) -> Result<StepOverResult> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
+
+        let (paused, location) = if let (Ok(mut state), Some(source_map)) =
+            (self.state.lock(), self.source_map.as_ref())
+        {
+            let advanced = self.stepper.step_over_source_line(&mut state, source_map);
+            let loc = state
+                .current_instruction()
+                .and_then(|i| source_map.lookup(i.offset));
+            (advanced, loc)
+        } else {
+            (false, None)
+        };
+
+        self.paused = paused;
+        Ok(StepOverResult { paused, location })
+    }
+
+    /// Step out of current function.
+    pub fn step_out(&mut self) -> Result<bool> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
+
+        let stepped = if let Ok(mut state) = self.state.lock() {
+            self.stepper.step_out(&mut state)
+        } else {
+            false
         };
         crate::plugin::registry::dispatch_global_event(
             &ExecutionEvent::AfterFunctionCall {
@@ -239,10 +517,17 @@ impl DebuggerEngine {
         if let Ok(mut state) = self.state.lock() {
             self.stepper.continue_execution(&mut state);
         }
+
+        let mut plugin_ctx = EventContext::new();
+        plugin_ctx.is_paused = false;
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::ExecutionResumed,
+            &mut plugin_ctx,
+        );
         Ok(())
     }
 
-    fn pause_at_function(&mut self, function: &str) {
+    fn pause_at_function(&mut self, function: &str, condition: Option<String>) {
         crate::logging::log_breakpoint(function);
         self.paused = true;
 
@@ -250,6 +535,22 @@ impl DebuggerEngine {
             state.set_current_function(function.to_string(), None);
             state.call_stack().display();
         }
+
+        let mut plugin_ctx = EventContext::new();
+        plugin_ctx.is_paused = true;
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::BreakpointHit {
+                function: function.to_string(),
+                condition,
+            },
+            &mut plugin_ctx,
+        );
+        crate::plugin::registry::dispatch_global_event(
+            &ExecutionEvent::ExecutionPaused {
+                reason: "breakpoint".to_string(),
+            },
+            &mut plugin_ctx,
+        );
     }
 
     pub fn is_paused(&self) -> bool {
@@ -281,6 +582,10 @@ impl DebuggerEngine {
 
     pub fn breakpoints_mut(&mut self) -> &mut BreakpointManager {
         &mut self.breakpoints
+    }
+
+    pub fn breakpoints(&self) -> &BreakpointManager {
+        &self.breakpoints
     }
 
     pub fn executor(&self) -> &ContractExecutor {

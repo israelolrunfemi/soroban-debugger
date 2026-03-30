@@ -2,10 +2,63 @@
 //!
 //! Supports `NO_COLOR` (disable ANSI colors) and `--no-unicode` (ASCII-only output).
 
+use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static NO_UNICODE: AtomicBool = AtomicBool::new(false);
 static COLORS_ENABLED: AtomicBool = AtomicBool::new(true);
+pub const SCHEMA_VERSION: &str = "1.0.0";
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputStatus {
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutputError {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionedOutput<T>
+where
+    T: Serialize,
+{
+    pub schema_version: &'static str,
+    pub command: String,
+    pub status: OutputStatus,
+    pub result: Option<T>,
+    pub error: Option<OutputError>,
+}
+
+impl<T> VersionedOutput<T>
+where
+    T: Serialize,
+{
+    pub fn success(command: impl Into<String>, result: T) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            command: command.into(),
+            status: OutputStatus::Success,
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    pub fn error(command: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION,
+            command: command.into(),
+            status: OutputStatus::Error,
+            result: None,
+            error: Some(OutputError {
+                message: message.into(),
+            }),
+        }
+    }
+}
 
 /// Global output/accessibility configuration.
 pub struct OutputConfig;
@@ -119,4 +172,44 @@ impl StatusLabel {
 /// Spinner / progress: in no-unicode or accessibility mode, return static text instead of Unicode spinner.
 pub fn spinner_text() -> &'static str {
     "[WORKING...]"
+}
+
+/// Helper for writing output to both stdout and optionally to a file
+pub struct OutputWriter {
+    file: Option<std::fs::File>,
+}
+
+impl OutputWriter {
+    /// Create a new OutputWriter that optionally writes to a file
+    pub fn new(path: Option<&std::path::Path>, append: bool) -> miette::Result<Self> {
+        let file = if let Some(p) = path {
+            if append {
+                Some(
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(p)
+                        .map_err(|e| miette::miette!("Failed to open output file: {}", e))?,
+                )
+            } else {
+                Some(
+                    std::fs::File::create(p)
+                        .map_err(|e| miette::miette!("Failed to create output file: {}", e))?,
+                )
+            }
+        } else {
+            None
+        };
+        Ok(Self { file })
+    }
+
+    /// Write a line to the file (if configured)
+    pub fn write(&mut self, text: &str) -> miette::Result<()> {
+        if let Some(ref mut f) = self.file {
+            use std::io::Write;
+            writeln!(f, "{}", text)
+                .map_err(|e| miette::miette!("Failed to write to output file: {}", e))?;
+        }
+        Ok(())
+    }
 }
