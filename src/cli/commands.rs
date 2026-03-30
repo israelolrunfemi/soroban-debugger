@@ -277,12 +277,12 @@ fn run_instruction_stepping(
     loop {
         print!("(step) > ");
         std::io::Write::flush(&mut std::io::stdout())
-            .map_err(|e| DebuggerError::FileError(format!("Failed to flush stdout: {}", e)))?;
+            .map_err(|e| DebuggerError::IoError(format!("Failed to flush stdout: {}", e)))?;
 
         let mut input = String::new();
         std::io::stdin()
             .read_line(&mut input)
-            .map_err(|e| DebuggerError::FileError(format!("Failed to read line: {}", e)))?;
+            .map_err(|e| DebuggerError::IoError(format!("Failed to read line: {}", e)))?;
 
         let input = input.trim().to_lowercase();
         let cmd = input.as_str();

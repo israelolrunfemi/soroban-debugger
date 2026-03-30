@@ -91,6 +91,13 @@ pub enum DebuggerError {
         help("Action: Check file permissions, path spelling, and directory access rules.\nContext: The tool could not read or write the designated filesystem path.")
     )]
     FileError(String),
+ 
+     #[error("I/O operation failed: {0}")]
+     #[diagnostic(
+         code(debugger::io_error),
+         help("Action: Ensure the terminal or stream is available and writable.\nContext: An error occurred during standard input or output operations.")
+     )]
+     IoError(String),
 
     #[error("Network/transport error: {0}")]
     #[diagnostic(

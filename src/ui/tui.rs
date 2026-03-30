@@ -54,12 +54,12 @@ impl DebuggerUI {
         loop {
             print!("\n(debug) ");
             io::stdout().flush().map_err(|e| {
-                crate::DebuggerError::FileError(format!("Failed to flush stdout: {}", e))
+                crate::DebuggerError::IoError(format!("Failed to flush stdout: {}", e))
             })?;
 
             let mut input = String::new();
             io::stdin().read_line(&mut input).map_err(|e| {
-                crate::DebuggerError::FileError(format!("Failed to read line: {}", e))
+                crate::DebuggerError::IoError(format!("Failed to read line: {}", e))
             })?;
 
             let command = input.trim();
