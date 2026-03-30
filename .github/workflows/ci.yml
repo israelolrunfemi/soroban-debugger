@@ -88,11 +88,8 @@ jobs:
       - name: Check extension dist drift
         run: npm --prefix extensions/vscode run check:dist
 
-      - name: Run extension smoke tests
-        run: npm --prefix extensions/vscode run test:smoke
-
-      - name: Run extension DAP E2E tests
-        run: npm --prefix extensions/vscode run test:dap-e2e
+      - name: Run extension aggregate tests
+        run: npm --prefix extensions/vscode run test:all
 
   lint:
     name: Lint (Clippy & Format)

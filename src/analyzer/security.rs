@@ -532,25 +532,25 @@ impl SecurityRule for AuthorizationCheckRule {
         trace: &[DynamicTraceEvent],
     ) -> Result<Vec<SecurityFinding>> {
         let mut findings = Vec::new();
-        let mut auth_actors_per_frame: std::collections::HashMap<
-            FrameKey,
-            std::collections::HashMap<String, usize>,
-        > = std::collections::HashMap::new();
+        let mut auth_actors_per_frame: HashMap<FrameKey, HashMap<String, usize>> = HashMap::new();
+        let mut auth_actors_per_function: HashMap<String, HashMap<String, usize>> = HashMap::new();
 
         // First pass: find authorized actors per frame
         for entry in trace {
             if entry.kind == DynamicTraceEventKind::Authorization {
+                let actor = effective_actor(entry);
+                let function_name = function_scope(entry.function.as_deref());
+                if let Some(actor) = actor.as_ref() {
+                    auth_actors_per_function
+                        .entry(function_name)
+                        .or_default()
+                        .entry(actor.clone())
+                        .or_insert(entry.sequence);
+                }
+
                 if let Some(frame) = frame_key_for(entry) {
                     let actors = auth_actors_per_frame.entry(frame).or_default();
-                    let addr = entry.address.clone().or_else(|| {
-                        // Legacy fallback
-                        entry
-                            .message
-                            .split_whitespace()
-                            .find(|w| (w.starts_with('G') || w.starts_with('C')) && w.len() == 56)
-                            .map(|s| s.to_string())
-                    });
-                    if let Some(addr) = addr {
+                    if let Some(addr) = actor {
                         actors.entry(addr).or_insert(entry.sequence);
                     }
                 }
@@ -561,31 +561,51 @@ impl SecurityRule for AuthorizationCheckRule {
         // Second pass: check storage writes
         for entry in trace {
             if entry.kind == DynamicTraceEventKind::StorageWrite {
+                let function_name = function_scope(entry.function.as_deref());
                 if let Some(frame) = frame_key_for(entry) {
-                    if let Some(authorized_actors) = auth_actors_per_frame.get(&frame) {
+                    let frame_actors = auth_actors_per_frame.get(&frame);
+                    let function_actors = auth_actors_per_function.get(&function_name);
+                    let authorized_actors = frame_actors.or(function_actors);
+
+                    if let Some(authorized_actors) = authorized_actors {
                         let earliest_auth = authorized_actors
                             .values()
                             .min()
                             .cloned()
                             .unwrap_or(usize::MAX);
                         if entry.sequence < earliest_auth {
-                            problematic_writes.push((entry.clone(), format!("Storage mutation detected before any authorization in frame '{}'.", frame.function.as_deref().unwrap_or("unknown"))));
+                            problematic_writes.push((entry.clone(), format!("Storage mutation detected before any authorization in function '{}' frame '{}'.", function_name, frame.function.as_deref().unwrap_or("unknown"))));
                         } else if let Some(key) = &entry.storage_key {
                             let covered = authorized_actors.keys().any(|addr| key.contains(addr));
                             if !covered && !authorized_actors.is_empty() {
                                 problematic_writes.push((entry.clone(), format!(
-                                    "Storage mutation to key '{}' detected without authorization for a relevant actor in frame '{}'. Authorized actors: {:?}",
+                                    "Storage mutation to key '{}' detected without authorization for a relevant actor in function '{}' frame '{}'. Authorized actors: {:?}",
                                     key,
+                                    function_name,
                                     frame.function.as_deref().unwrap_or("unknown"),
                                     authorized_actors.keys().collect::<Vec<_>>()
                                 )));
                             }
                         }
                     } else {
-                        problematic_writes.push((entry.clone(), format!("Storage mutation detected without any preceding authorization in frame '{}'.", frame.function.as_deref().unwrap_or("unknown"))));
+                        problematic_writes.push((entry.clone(), format!("Storage mutation detected without any preceding authorization in function '{}' frame '{}'.", function_name, frame.function.as_deref().unwrap_or("unknown"))));
                     }
                 } else {
-                    problematic_writes.push((entry.clone(), "Storage mutation detected without frame metadata or preceding authorization.".to_string()));
+                    if let Some(authorized_actors) = auth_actors_per_function.get(&function_name) {
+                        if let Some(key) = &entry.storage_key {
+                            let covered = authorized_actors.keys().any(|addr| key.contains(addr));
+                            if !covered && !authorized_actors.is_empty() {
+                                problematic_writes.push((entry.clone(), format!(
+                                    "Storage mutation to key '{}' detected without relevant authorization in function '{}'. Authorized actors: {:?}",
+                                    key,
+                                    function_name,
+                                    authorized_actors.keys().collect::<Vec<_>>()
+                                )));
+                            }
+                        }
+                    } else {
+                        problematic_writes.push((entry.clone(), format!("Storage mutation detected without frame metadata or preceding authorization in function '{}'.", function_name)));
+                    }
                 }
             }
         }
@@ -677,6 +697,8 @@ struct PendingCrossCall {
     pre_call_write_seen: bool,
     inferred: bool,
     call_depth: Option<u64>,
+    function: Option<String>,
+    caller: Option<String>,
 }
 
 struct CrossContractImportRule;
@@ -1440,6 +1462,20 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     .map(|s| s.as_str())
                     .unwrap_or("unknown");
                 let storage_key = entry.storage_key.as_deref().unwrap_or("unknown");
+                let write_frame_name = active_frame
+                    .as_ref()
+                    .and_then(|f| f.function.as_deref())
+                    .unwrap_or("unknown");
+                let call_fn = pending.function.as_deref().unwrap_or(func_name);
+                let call_depth = pending
+                    .call_depth
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let write_depth = entry
+                    .call_depth
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let caller = pending.caller.as_deref().unwrap_or("unknown");
 
                 findings.push(SecurityFinding {
                     rule_id: "reentrancy-pattern".to_string(),
@@ -1448,12 +1484,25 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     } else {
                         Severity::Low
                     },
-                    location: format!("Trace event {}", entry.sequence),
-                    description: "Storage write detected after an external contract call in the same execution frame. Possible reentrancy risk.".to_string(),
-                    remediation: "Follow checks-effects-interactions: finalize critical state before external calls, or isolate post-call writes to benign bookkeeping.".to_string(),
+                    location: format!("Trace events {} -> {}", pending.sequence, entry.sequence),
+                    description: format!(
+                        "Cross-contract call in '{}' (caller '{}', depth {}) at event {} was followed by storage write to '{}' in '{}' (depth {}) at event {}.",
+                        call_fn,
+                        caller,
+                        call_depth,
+                        pending.sequence,
+                        storage_key,
+                        write_frame_name,
+                        write_depth,
+                        entry.sequence
+                    ),
+                    remediation: "Apply checks-effects-interactions: perform critical state updates before external calls, guard re-entry paths, and restrict post-call writes to idempotent bookkeeping.".to_string(),
                     confidence: Some(confidence),
                     rationale: Some(rationale),
-                    fingerprint: format!("{}:{}:{}", "reentrancy-pattern", func_name, storage_key),
+                    fingerprint: format!(
+                        "{}:{}:{}:{}",
+                        "reentrancy-pattern", pending.sequence, entry.sequence, storage_key
+                    ),
                     suppressed: false,
                 });
                 pending_cross_call = None;
@@ -1472,6 +1521,8 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     pre_call_write_seen,
                     inferred: active_frame.is_none(),
                     call_depth: entry.call_depth, // Match Option<usize>
+                    function: entry.function.clone(),
+                    caller: entry.caller.clone(),
                 });
             }
             DynamicTraceEventKind::CrossContractReturn => {
@@ -1533,6 +1584,20 @@ fn frame_key_for(entry: &DynamicTraceEvent) -> Option<FrameKey> {
         function: entry.function.clone(),
         call_depth: entry.call_depth,
     })
+}
+
+fn effective_actor(entry: &DynamicTraceEvent) -> Option<String> {
+    entry.address.clone().or_else(|| {
+        entry
+            .message
+            .split_whitespace()
+            .find(|w| (w.starts_with('G') || w.starts_with('C')) && w.len() == 56)
+            .map(|s| s.to_string())
+    })
+}
+
+fn function_scope(function: Option<&str>) -> String {
+    function.unwrap_or("unknown").to_string()
 }
 
 #[cfg(test)]

@@ -1095,6 +1095,10 @@ async function runDapHappyPathE2E(
     const disconnect = await client.request("disconnect", { restart: false });
     assert.equal(disconnect.success, true);
   } finally {
+    if (stderrOutput.trim().length > 0) {
+      console.error("[dap-e2e][adapter-stderr]\n" + stderrOutput.trim());
+    }
+    console.error("[dap-e2e][last-protocol-messages]\n" + client.formatRecentTranscript(40));
     client.dispose();
   }
 }

@@ -129,6 +129,7 @@ The second form is easy to leak through shell history, process listings, shared 
 Use TLS whenever the server is reachable beyond a tightly controlled private boundary.
 Native TLS is enabled only when you provide both `--tls-cert` and `--tls-key`.
 Supplying only one of those flags is rejected during server startup.
+If startup fails with that validation error, either provide both flags together or remove both flags and keep transport private (for example, loopback + SSH tunnel).
 
 ```bash
 openssl req -x509 -newkey rsa:4096 \

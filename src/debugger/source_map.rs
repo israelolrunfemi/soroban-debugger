@@ -230,22 +230,23 @@ impl SourceMap {
                     if let Some(file_path) =
                         self.get_file_path(&dwarf, &unit, header, row.file_index())
                     {
-                        let offset =
-                            self.normalize_wasm_offset(row.address() as usize, wasm_bytes.len());
+                        let (offset, alt_offset) =
+                            self.normalize_wasm_offsets(row.address() as usize, wasm_bytes.len());
                         let line = row.line().map(|l| l.get() as u32).unwrap_or(0);
                         let column = match row.column() {
                             gimli::ColumnType::LeftEdge => None,
                             gimli::ColumnType::Column(column) => Some(column.get() as u32),
                         };
+                        let location = SourceLocation {
+                            file: file_path,
+                            line,
+                            column,
+                        };
 
-                        self.offsets.insert(
-                            offset,
-                            SourceLocation {
-                                file: file_path,
-                                line,
-                                column,
-                            },
-                        );
+                        self.offsets.insert(offset, location.clone());
+                        if let Some(alt_offset) = alt_offset {
+                            self.offsets.entry(alt_offset).or_insert(location);
+                        }
                     }
                 }
             } else {
@@ -337,18 +338,17 @@ impl SourceMap {
                 // load() failed partway through: any mappings collected are
                 // partial. Downgrade "source" → "partial-source" so the mode
                 // accurately reflects that the parse did not complete.
-                let (fallback_mode, fallback_message) = if mappings_count > 0
-                    && fallback_mode == "source"
-                {
-                    (
-                        "partial-source".to_string(),
-                        "DWARF parse failed after collecting some mappings; \
+                let (fallback_mode, fallback_message) =
+                    if mappings_count > 0 && fallback_mode == "source" {
+                        (
+                            "partial-source".to_string(),
+                            "DWARF parse failed after collecting some mappings; \
                          results may be incomplete."
-                            .to_string(),
-                    )
-                } else {
-                    (fallback_mode, fallback_message)
-                };
+                                .to_string(),
+                        )
+                    } else {
+                        (fallback_mode, fallback_message)
+                    };
 
                 Ok(SourceMapInspectionReport {
                     mappings_count,
@@ -377,26 +377,45 @@ impl SourceMap {
         self.offsets.iter().map(|(o, l)| (*o, l))
     }
 
-    fn normalize_wasm_offset(&self, dwarf_address: usize, wasm_len: usize) -> usize {
+    fn normalize_wasm_offsets(
+        &self,
+        dwarf_address: usize,
+        wasm_len: usize,
+    ) -> (usize, Option<usize>) {
         let Some(code_range) = &self.code_section_range else {
-            return dwarf_address;
+            return (dwarf_address, None);
         };
 
-        // Common case: DWARF line-program addresses are offsets into the code-section payload.
         let code_start = code_range.start;
+        let code_end = code_range.end;
         let code_len = code_range.end.saturating_sub(code_range.start);
+        let module_candidate = dwarf_address;
 
-        // If the address already looks like a module/file offset, keep it.
-        if dwarf_address >= code_start && dwarf_address < wasm_len {
-            return dwarf_address;
+        let relative_candidate = dwarf_address
+            .checked_add(code_start)
+            .filter(|candidate| *candidate < wasm_len);
+        let module_in_code = module_candidate >= code_start
+            && module_candidate < code_end
+            && module_candidate < wasm_len;
+        let relative_in_code = dwarf_address < code_len
+            && relative_candidate
+                .map(|candidate| candidate >= code_start && candidate < code_end)
+                .unwrap_or(false);
+
+        match (module_in_code, relative_in_code) {
+            (true, true) => (module_candidate, relative_candidate),
+            (true, false) => (module_candidate, None),
+            (false, true) => (relative_candidate.unwrap_or(module_candidate), None),
+            (false, false) => {
+                if module_candidate < wasm_len {
+                    (module_candidate, None)
+                } else if let Some(relative_candidate) = relative_candidate {
+                    (relative_candidate, None)
+                } else {
+                    (dwarf_address, None)
+                }
+            }
         }
-
-        // Otherwise, treat addresses within the code-section payload length as relative.
-        if dwarf_address < code_len {
-            return code_start.saturating_add(dwarf_address);
-        }
-
-        dwarf_address
     }
 
     fn get_file_path(
@@ -511,8 +530,9 @@ impl SourceMap {
         source_path: &Path,
         requested_lines: &[u32],
         exported_functions: &HashSet<String>,
+        max_forward: Option<u32>,
     ) -> Vec<SourceBreakpointResolution> {
-        const MAX_FORWARD_LINE_ADJUST: u32 = 20;
+        let max_forward = max_forward.unwrap_or(20);
 
         if requested_lines.is_empty() {
             return Vec::new();
@@ -553,6 +573,12 @@ impl SourceMap {
         };
 
         let requested_norm = normalize_path_for_match(source_path);
+        let filename_ambiguous = is_filename_ambiguous(
+            self.offsets
+                .values()
+                .map(|loc| normalize_path_for_match(&loc.file)),
+            &requested_norm,
+        );
         let mut line_to_offsets: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         let mut file_match_count = 0usize;
 
@@ -562,7 +588,11 @@ impl SourceMap {
                 continue;
             }
 
-            if !paths_match_normalized(&normalize_path_for_match(&loc.file), &requested_norm) {
+            if !paths_match_normalized(
+                &normalize_path_for_match(&loc.file),
+                &requested_norm,
+                filename_ambiguous,
+            ) {
                 continue;
             }
 
@@ -614,7 +644,7 @@ impl SourceMap {
                     if let Some((next_line, offsets)) =
                         line_to_offsets.range(*requested_line..).next()
                     {
-                        if next_line.saturating_sub(*requested_line) <= MAX_FORWARD_LINE_ADJUST {
+                        if next_line.saturating_sub(*requested_line) <= max_forward {
                             found = Some((*next_line, offsets));
                         }
                     }
@@ -881,7 +911,7 @@ fn normalize_path_for_match(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn paths_match_normalized(a: &str, b: &str) -> bool {
+fn paths_match_normalized(a: &str, b: &str, filename_ambiguous: bool) -> bool {
     if a == b {
         return true;
     }
@@ -892,7 +922,45 @@ fn paths_match_normalized(a: &str, b: &str) -> bool {
 
     let a_file = a.rsplit('/').next().unwrap_or(a);
     let b_file = b.rsplit('/').next().unwrap_or(b);
-    a_file == b_file
+    if a_file != b_file {
+        return false;
+    }
+
+    if !filename_ambiguous {
+        return true;
+    }
+
+    suffix_components_match(a, b, 2)
+}
+
+fn suffix_components_match(a: &str, b: &str, components: usize) -> bool {
+    let a_parts: Vec<&str> = a.split('/').filter(|part| !part.is_empty()).collect();
+    let b_parts: Vec<&str> = b.split('/').filter(|part| !part.is_empty()).collect();
+    if a_parts.len() < components || b_parts.len() < components {
+        return false;
+    }
+
+    a_parts[a_parts.len() - components..] == b_parts[b_parts.len() - components..]
+}
+
+fn is_filename_ambiguous<I>(paths: I, requested: &str) -> bool
+where
+    I: Iterator<Item = String>,
+{
+    let requested_file = requested.rsplit('/').next().unwrap_or(requested);
+    let mut matching_paths: HashSet<String> = HashSet::new();
+
+    for path in paths {
+        let file = path.rsplit('/').next().unwrap_or(&path);
+        if file == requested_file {
+            matching_paths.insert(path);
+            if matching_paths.len() > 1 {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -1000,6 +1068,41 @@ mod tests {
         push_section(&mut bytes, 0x0a, &code_section);
 
         bytes
+    }
+
+    #[test]
+    fn normalize_wasm_offsets_keeps_alternate_for_ambiguous_addresses() {
+        let sm = SourceMap {
+            code_section_range: Some(100..400),
+            ..SourceMap::new()
+        };
+
+        let (primary, alternate) = sm.normalize_wasm_offsets(150, 500);
+
+        assert_eq!(primary, 150);
+        assert_eq!(alternate, Some(250));
+    }
+
+    #[test]
+    fn ambiguous_addresses_resolve_for_both_coordinate_spaces() {
+        let mut sm = SourceMap {
+            code_section_range: Some(100..400),
+            ..SourceMap::new()
+        };
+        let location = SourceLocation {
+            file: PathBuf::from("lib.rs"),
+            line: 9,
+            column: Some(1),
+        };
+
+        let (primary, alternate) = sm.normalize_wasm_offsets(150, 500);
+        sm.offsets.insert(primary, location.clone());
+        if let Some(alternate) = alternate {
+            sm.offsets.entry(alternate).or_insert(location.clone());
+        }
+
+        assert_eq!(sm.lookup(150), Some(location.clone()));
+        assert_eq!(sm.lookup(250), Some(location));
     }
 
     #[test]
@@ -1211,5 +1314,41 @@ mod tests {
         assert!(resolved[0].message.contains("[AMBIGUOUS]"));
         assert!(resolved[0].message.contains("alpha"));
         assert!(resolved[0].message.contains("beta"));
+    }
+
+    #[test]
+    fn resolve_source_breakpoints_disambiguates_same_filename_by_parent_directory() {
+        let wasm = wasm_with_functions_and_exports(&[("alpha", 0), ("beta", 1)], 2);
+        let index = WasmIndex::parse(&wasm).unwrap();
+        let alpha_offset = index.function_bodies[0].0.start;
+        let beta_offset = index.function_bodies[1].0.start;
+
+        let mut sm = SourceMap::new();
+        sm.add_mapping(
+            alpha_offset,
+            SourceLocation {
+                file: PathBuf::from("/workspace/crate_a/src/lib.rs"),
+                line: 10,
+                column: None,
+            },
+        );
+        sm.add_mapping(
+            beta_offset,
+            SourceLocation {
+                file: PathBuf::from("/workspace/crate_b/src/lib.rs"),
+                line: 10,
+                column: None,
+            },
+        );
+
+        let exported_functions = HashSet::from([String::from("alpha"), String::from("beta")]);
+        let requested_path = PathBuf::from("crate_a/src/lib.rs");
+        let resolved =
+            sm.resolve_source_breakpoints(&wasm, &requested_path, &[10], &exported_functions);
+
+        assert_eq!(resolved.len(), 1);
+        assert!(resolved[0].verified);
+        assert_eq!(resolved[0].reason_code, "OK");
+        assert_eq!(resolved[0].function.as_deref(), Some("alpha"));
     }
 }
