@@ -49,7 +49,7 @@ pub enum ArgumentParseError {
     ConversionError(String),
 
     #[error("JSON parsing error: {0}")]
-    JsonError(String),
+    JsonError(#[from] serde_json::Error),
 
     #[error("Empty arguments")]
     EmptyArguments,
@@ -64,12 +64,6 @@ pub enum ArgumentParseError {
         min: String,
         max: String,
     },
-}
-
-impl From<serde_json::Error> for ArgumentParseError {
-    fn from(err: serde_json::Error) -> Self {
-        ArgumentParseError::JsonError(err.to_string())
-    }
 }
 
 /// Argument parser for converting JSON to Soroban values
@@ -1293,5 +1287,438 @@ mod tests {
             r#"[ {"type": "vec", "element_type": "vec", "value": [[1, 2], [3, 4]]} ]"#,
         );
         assert!(result.is_ok());
+    }
+
+    // ══════════════════════════════════════════════════════════════════
+    // Edge-case tests (integer boundaries, invalid JSON, nested structs,
+    // null in non-optional positions, bytes, vec/tuple, address)
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── u64 boundary values ──────────────────────────────────────────
+
+    #[test]
+    fn test_typed_u64_zero() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "u64", "value": 0}]"#);
+        assert!(result.is_ok(), "u64 zero failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_u64_max() {
+        let parser = create_parser();
+        let result =
+            parser.parse_args_string(r#"[{"type": "u64", "value": 18446744073709551615}]"#);
+        assert!(result.is_ok(), "u64 max failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_u64_negative_rejected() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "u64", "value": -1}]"#);
+        assert!(result.is_err());
+    }
+
+    // ── i64 boundary values ──────────────────────────────────────────
+
+    #[test]
+    fn test_typed_i64_min() {
+        let parser = create_parser();
+        let result =
+            parser.parse_args_string(r#"[{"type": "i64", "value": -9223372036854775808}]"#);
+        assert!(result.is_ok(), "i64 min failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_i64_max() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "i64", "value": 9223372036854775807}]"#);
+        assert!(result.is_ok(), "i64 max failed: {:?}", result.err());
+    }
+
+    // ── i32 underflow ────────────────────────────────────────────────
+
+    #[test]
+    fn test_typed_i32_underflow() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "i32", "value": -2147483649}]"#);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("out of range") || err.contains("Out of range") || err.contains("i32"),
+            "Expected range error for i32 underflow, got: {}",
+            err
+        );
+    }
+
+    // ── u128 boundary values ─────────────────────────────────────────
+
+    #[test]
+    fn test_typed_u128_zero() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "u128", "value": 0}]"#);
+        assert!(result.is_ok(), "u128 zero failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_u128_large() {
+        let parser = create_parser();
+        // u128 conversion goes through as_u64(), so max representable is u64::MAX
+        let result =
+            parser.parse_args_string(r#"[{"type": "u128", "value": 18446744073709551615}]"#);
+        assert!(result.is_ok(), "u128 large failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_u128_negative_rejected() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "u128", "value": -1}]"#);
+        assert!(result.is_err());
+    }
+
+    // ── i128 boundary values ─────────────────────────────────────────
+
+    #[test]
+    fn test_typed_i128_zero() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "i128", "value": 0}]"#);
+        assert!(result.is_ok(), "i128 zero failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_i128_negative_large() {
+        let parser = create_parser();
+        let result =
+            parser.parse_args_string(r#"[{"type": "i128", "value": -9223372036854775808}]"#);
+        assert!(
+            result.is_ok(),
+            "i128 negative large failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_typed_i128_type_mismatch() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "i128", "value": "not_a_number"}]"#);
+        assert!(result.is_err());
+    }
+
+    // ── Invalid JSON inputs ──────────────────────────────────────────
+
+    #[test]
+    fn test_malformed_json_missing_brace() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"{"type": "u32""#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_trailing_comma() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("[1, 2,]");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_single_quote() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("{'key': 'val'}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_wrong_brackets() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("{1, 2, 3}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_unquoted_key() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"{key: "val"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_colon_only() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(":");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_malformed_json_random_garbage() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("abc!@#");
+        assert!(result.is_err());
+    }
+
+    // ── String and whitespace edge cases ─────────────────────────────
+
+    #[test]
+    fn test_whitespace_tabs_only() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("\t\t\t");
+        assert!(matches!(result, Err(ArgumentParseError::EmptyArguments)));
+    }
+
+    #[test]
+    fn test_whitespace_newlines_only() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("\n\n\n");
+        assert!(matches!(result, Err(ArgumentParseError::EmptyArguments)));
+    }
+
+    #[test]
+    fn test_whitespace_mixed() {
+        let parser = create_parser();
+        let result = parser.parse_args_string("  \t\n  \r\n  ");
+        assert!(matches!(result, Err(ArgumentParseError::EmptyArguments)));
+    }
+
+    #[test]
+    fn test_unicode_string_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "string", "value": "Hello 🌍 世界"}]"#);
+        assert!(result.is_ok(), "Unicode string failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_typed_empty_string_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "string", "value": ""}]"#);
+        assert!(result.is_ok());
+    }
+
+    // ── Deeply nested structures ─────────────────────────────────────
+
+    #[test]
+    fn test_deeply_nested_map_five_levels() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"{"l1":{"l2":{"l3":{"l4":{"l5":"bottom"}}}}}"#);
+        assert!(
+            result.is_ok(),
+            "5-level nested map failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_deeply_nested_vec_in_map() {
+        let parser = create_parser();
+        let result =
+            parser.parse_args_string(r#"{"data":{"items":[[1,2],[3,4]],"nested":{"flag":true}}}"#);
+        assert!(result.is_ok(), "Vec in map failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_deeply_nested_mixed_structures() {
+        let parser = create_parser();
+        // Map → Vec → Map → Vec → value
+        let result = parser.parse_args_string(r#"{"outer":[{"inner":[1,2,3]},{"inner":[4,5,6]}]}"#);
+        assert!(
+            result.is_ok(),
+            "Mixed nested structures failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_map_with_many_keys() {
+        let parser = create_parser();
+        let json = r#"{
+            "k01":1,"k02":2,"k03":3,"k04":4,"k05":5,
+            "k06":6,"k07":7,"k08":8,"k09":9,"k10":10,
+            "k11":11,"k12":12,"k13":13,"k14":14,"k15":15,
+            "k16":16,"k17":17,"k18":18,"k19":19,"k20":20
+        }"#;
+        let result = parser.parse_args_string(json);
+        assert!(
+            result.is_ok(),
+            "Map with 20 keys failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_empty_nested_structures() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"{"empty_obj":{},"empty_arr":[]}"#);
+        assert!(
+            result.is_ok(),
+            "Empty nested structures failed: {:?}",
+            result.err()
+        );
+    }
+
+    // ── Null in non-optional typed positions ─────────────────────────
+
+    #[test]
+    fn test_null_as_u32_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "u32", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for u32");
+    }
+
+    #[test]
+    fn test_null_as_i32_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "i32", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for i32");
+    }
+
+    #[test]
+    fn test_null_as_u64_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "u64", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for u64");
+    }
+
+    #[test]
+    fn test_null_as_i64_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "i64", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for i64");
+    }
+
+    #[test]
+    fn test_null_as_bool_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bool", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for bool");
+    }
+
+    #[test]
+    fn test_null_as_string_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "string", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for string");
+    }
+
+    #[test]
+    fn test_null_as_symbol_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "symbol", "value": null}]"#);
+        assert!(result.is_err(), "null should not be valid for symbol");
+    }
+
+    // ── Bytes and BytesN edge cases ──────────────────────────────────
+
+    #[test]
+    fn test_bytes_valid_hex() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bytes", "value": "0xdeadbeef"}]"#);
+        assert!(result.is_ok(), "hex bytes failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_bytes_valid_base64() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bytes", "value": "base64:AAEC"}]"#);
+        assert!(result.is_ok(), "base64 bytes failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_bytes_invalid_prefix() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bytes", "value": "noprefixhex"}]"#);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must start with '0x' or 'base64:'"));
+    }
+
+    #[test]
+    fn test_bytes_invalid_hex_chars() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bytes", "value": "0xZZZZ"}]"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Invalid hex"));
+    }
+
+    #[test]
+    fn test_bytesn_length_mismatch() {
+        let parser = create_parser();
+        // 0xdeadbeef = 4 bytes, but length says 8
+        let result =
+            parser.parse_args_string(r#"[{"type": "bytesn", "value": "0xdeadbeef", "length": 8}]"#);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("length mismatch"));
+    }
+
+    #[test]
+    fn test_bytesn_missing_length() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bytesn", "value": "0xdeadbeef"}]"#);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a 'length' field"));
+    }
+
+    #[test]
+    fn test_bytes_non_string_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "bytes", "value": 123}]"#);
+        assert!(result.is_err());
+    }
+
+    // ── Vec / Tuple edge cases ───────────────────────────────────────
+
+    #[test]
+    fn test_vec_non_array_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "vec", "value": 42}]"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tuple_non_array_value() {
+        let parser = create_parser();
+        let result =
+            parser.parse_args_string(r#"[{"type": "tuple", "value": "not_array", "arity": 1}]"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tuple_no_arity_succeeds() {
+        let parser = create_parser();
+        // Without arity field, tuple should just succeed with any array length
+        let result = parser.parse_args_string(r#"[{"type": "tuple", "value": [1, 2, 3]}]"#);
+        assert!(
+            result.is_ok(),
+            "Tuple without arity should succeed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_tuple_zero_arity_empty() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "tuple", "value": [], "arity": 0}]"#);
+        assert!(
+            result.is_ok(),
+            "Tuple with arity 0 and empty array failed: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_vec_empty_array() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "vec", "value": []}]"#);
+        assert!(result.is_ok(), "Empty vec failed: {:?}", result.err());
+    }
+
+    // ── Address edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn test_address_non_string_value() {
+        let parser = create_parser();
+        let result = parser.parse_args_string(r#"[{"type": "address", "value": 42}]"#);
+        assert!(result.is_err());
     }
 }

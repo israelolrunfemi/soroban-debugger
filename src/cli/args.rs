@@ -41,11 +41,28 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Export format for profiler output (issue #502).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ProfileExportFormat {
+    #[default]
+    Report,
+    FoldedStack,
+    Json,
+}
+
 /// Format for dependency graph output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum GraphFormat {
     Dot,
     Mermaid,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum SymbolicProfile {
+    Fast,
+    #[default]
+    Balanced,
+    Deep,
 }
 
 impl Verbosity {
@@ -76,6 +93,17 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_banner: bool,
 
+    /// Override the history file location (useful for CI, sandboxes, and per-project isolation)
+    ///
+    /// Equivalent to setting `SOROBAN_DEBUG_HISTORY_FILE`.
+    #[arg(
+        long,
+        global = true,
+        env = "SOROBAN_DEBUG_HISTORY_FILE",
+        value_name = "FILE"
+    )]
+    pub history_file: Option<PathBuf>,
+
     /// Show historical budget trend visualization
     #[arg(long)]
     pub budget_trend: bool,
@@ -87,6 +115,15 @@ pub struct Cli {
     /// Filter budget trend by function name
     #[arg(long)]
     pub trend_function: Option<String>,
+
+    #[arg(long, default_value_t = 10.0, value_name = "PCT", value_parser = clap::value_parser!(f64))]
+    pub trend_regression_threshold_pct: f64,
+
+    #[arg(long, default_value_t = 2, value_name = "N", value_parser = clap::value_parser!(usize))]
+    pub trend_regression_lookback: usize,
+
+    #[arg(long, default_value_t = 1, value_name = "N", value_parser = clap::value_parser!(usize))]
+    pub trend_regression_smoothing: usize,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -130,15 +167,17 @@ pub enum Commands {
     /// Inspect contract information without executing
     Inspect(InspectArgs),
 
+    /// Check compatibility between two contract versions
+    UpgradeCheck(UpgradeCheckArgs),
+
     /// Generate shell completion scripts
     Completions(CompletionsArgs),
+
     /// Analyze contract and generate gas optimization suggestions
     Optimize(OptimizeArgs),
 
     /// Profile a single function execution and print hotspots + suggestions
     Profile(ProfileArgs),
-    /// Check compatibility between two contract versions
-    UpgradeCheck(UpgradeCheckArgs),
 
     /// Compare two execution trace JSON files side-by-side
     Compare(CompareArgs),
@@ -160,21 +199,36 @@ pub enum Commands {
 
     /// Run a multi-step scenario from a TOML file
     Scenario(ScenarioArgs),
+
+    /// Prune or compact run history according to a retention policy
+    HistoryPrune(HistoryPruneArgs),
+
+    /// Plugin-provided subcommand (loaded at runtime)
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Parser)]
 pub struct RunArgs {
     /// Path to the contract WASM file
-    #[arg(short, long)]
-    pub contract: PathBuf,
+    #[arg(
+        short,
+        long,
+        required_unless_present_any = ["server", "remote"]
+    )]
+    pub contract: Option<PathBuf>,
 
     /// Deprecated: use --contract instead
     #[arg(long, hide = true, alias = "wasm", alias = "contract-path")]
     pub wasm: Option<PathBuf>,
 
     /// Function name to execute
-    #[arg(short, long)]
-    pub function: String,
+    #[arg(
+        short,
+        long,
+        required_unless_present_any = ["server", "remote"]
+    )]
+    pub function: Option<String>,
 
     /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
     #[arg(short, long)]
@@ -200,6 +254,33 @@ pub struct RunArgs {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Start in server mode
+    #[arg(long)]
+    pub server: bool,
+
+    /// Port to listen on or connect to
+    #[arg(short, long, default_value = "9229")]
+    pub port: u16,
+
+    /// Host/interface to bind when using --server
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
+    /// Connect to a remote debugger (address:port)
+    #[arg(long)]
+    pub remote: Option<String>,
+
+    /// Authentication token
+    #[arg(short, long)]
+    pub token: Option<String>,
+
+    /// Path to TLS certificate file
+    #[arg(long)]
+    pub tls_cert: Option<std::path::PathBuf>,
+
+    /// Path to TLS key file
+    #[arg(long)]
+    pub tls_key: Option<std::path::PathBuf>,
     /// Output format (text, json)
     #[arg(long)]
     pub format: Option<String>,
@@ -220,9 +301,13 @@ pub struct RunArgs {
     #[arg(long)]
     pub json: bool,
 
-    /// Filter events by topic
+    /// Filter events by topic (deprecated single value). Prefer using --event-filter (repeatable).
     #[arg(long)]
     pub filter_topic: Option<String>,
+
+    /// Filter events by topic pattern (repeatable)
+    #[arg(long, value_name = "PATTERN")]
+    pub event_filter: Vec<String>,
 
     /// Execute the contract call N times for stress testing
     #[arg(long)]
@@ -295,6 +380,9 @@ pub struct RunArgs {
     #[arg(long, default_value = "1000")]
     pub ttl_warning_threshold: u32,
 
+    /// Export execution trace to JSON file
+    #[arg(long)]
+    pub trace_output: Option<PathBuf>,
     /// Path to file where execution results should be saved
     #[arg(long, value_name = "FILE")]
     pub save_output: Option<PathBuf>,
@@ -362,6 +450,46 @@ pub struct InteractiveArgs {
     #[arg(long, hide = true, alias = "snapshot")]
     pub snapshot: Option<PathBuf>,
 
+    /// Function name to execute (staged; use 'continue' inside the session)
+    #[arg(short, long)]
+    pub function: String,
+
+    /// Function arguments as JSON array (e.g., '["arg1", "arg2"]')
+    #[arg(short, long)]
+    pub args: Option<String>,
+
+    /// Initial storage state as JSON object
+    #[arg(short, long)]
+    pub storage: Option<String>,
+
+    /// Import storage state from JSON file before starting the session
+    #[arg(long)]
+    pub import_storage: Option<PathBuf>,
+
+    /// Set breakpoint at function name
+    #[arg(short, long)]
+    pub breakpoint: Vec<String>,
+
+    /// Mock cross-contract return: CONTRACT_ID.function=return_value (repeatable)
+    #[arg(long, value_name = "CONTRACT_ID.function=return_value")]
+    pub mock: Vec<String>,
+
+    /// Execution timeout in seconds (default: 30)
+    #[arg(long, default_value = "30")]
+    pub timeout: u64,
+
+    /// Enable instruction-level debugging
+    #[arg(long)]
+    pub instruction_debug: bool,
+
+    /// Start with instruction stepping enabled
+    #[arg(long)]
+    pub step_instructions: bool,
+
+    /// Step mode for instruction debugging (into, over, out, block)
+    #[arg(long, default_value = "into")]
+    pub step_mode: String,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -399,6 +527,13 @@ pub struct ReplArgs {
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
+
+    /// Filter storage output by key pattern (repeatable). Supports:
+    ///   prefix*       — match keys starting with prefix
+    ///   re:<regex>    — match keys by regex
+    ///   exact_key     — match key exactly
+    #[arg(long, value_name = "PATTERN")]
+    pub watch_keys: Vec<String>,
 }
 
 impl ReplArgs {
@@ -413,6 +548,22 @@ pub struct CompletionsArgs {
     #[arg(value_enum)]
     pub shell: Shell,
 }
+
+#[derive(Parser)]
+pub struct HistoryPruneArgs {
+    /// Keep only the N most-recent records
+    #[arg(long, value_name = "COUNT")]
+    pub max_records: Option<usize>,
+
+    /// Drop records older than N days
+    #[arg(long, value_name = "DAYS")]
+    pub max_age_days: Option<u64>,
+
+    /// Print what would be removed without actually deleting anything
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
 #[derive(Parser)]
 pub struct InspectArgs {
     /// Path to the contract WASM file
@@ -431,6 +582,18 @@ pub struct InspectArgs {
     #[arg(long)]
     pub metadata: bool,
 
+    /// Output format: pretty (default) or json
+    #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+    pub format: OutputFormat,
+
+    /// Print source map diagnostics including resolved mappings, missing DWARF sections, and fallback behavior
+    #[arg(long)]
+    pub source_map_diagnostics: bool,
+
+    /// Maximum number of resolved mappings to print in source map diagnostics output
+    #[arg(long, default_value_t = 20, requires = "source_map_diagnostics")]
+    pub source_map_limit: usize,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -438,6 +601,30 @@ pub struct InspectArgs {
     /// Show cross-contract dependency graph in specified format
     #[arg(long, value_enum)]
     pub dependency_graph: Option<GraphFormat>,
+}
+
+#[derive(Parser)]
+pub struct UpgradeCheckArgs {
+    /// Path to the old (current) contract WASM file
+    #[arg(long)]
+    pub old: PathBuf,
+
+    /// Path to the new (upgraded) contract WASM file
+    #[arg(long)]
+    pub new: PathBuf,
+
+    /// Output format: text (default) or json
+    #[arg(long, default_value = "text")]
+    pub output: String,
+
+    /// Write report to file instead of stdout
+    #[arg(long)]
+    pub output_file: Option<PathBuf>,
+
+    /// Test inputs as JSON object mapping function names to argument arrays
+    /// e.g. '{"vote": [1, true], "create_proposal": ["title", "desc"]}'
+    #[arg(long)]
+    pub test_inputs: Option<String>,
 }
 
 #[derive(Parser)]
@@ -479,32 +666,9 @@ pub struct OptimizeArgs {
     pub snapshot: Option<PathBuf>,
 }
 
-#[derive(Parser)]
-pub struct UpgradeCheckArgs {
-    /// Path to the old contract WASM file
-    #[arg(short, long)]
-    pub old: PathBuf,
-
-    /// Path to the new contract WASM file
-    #[arg(short, long)]
-    pub new: PathBuf,
-
-    /// Function name to test side-by-side (optional)
-    #[arg(short, long)]
-    pub function: Option<String>,
-
-    /// Function arguments as JSON array for side-by-side test
-    #[arg(short, long)]
-    pub args: Option<String>,
-
-    /// Output file for the compatibility report (default: stdout)
-    #[arg(long)]
-    pub output: Option<PathBuf>,
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, OutputFormat};
+    use super::{Cli, Commands, OutputFormat, SymbolicProfile};
     use clap::Parser;
 
     #[test]
@@ -585,6 +749,123 @@ mod tests {
 
         assert!(args.is_json_output());
     }
+
+    #[test]
+    fn run_server_mode_does_not_require_contract_or_function() {
+        let cli = Cli::try_parse_from([
+            "soroban-debug",
+            "run",
+            "--server",
+            "-p",
+            "8888",
+            "-t",
+            "secret",
+        ])
+        .expect("failed to parse run --server");
+
+        let Commands::Run(args) = cli.command.expect("run command expected") else {
+            panic!("run command expected");
+        };
+
+        assert!(args.server);
+        assert_eq!(args.port, 8888);
+        assert_eq!(args.token, Some("secret".to_string()));
+        assert!(args.contract.is_none());
+        assert!(args.function.is_none());
+    }
+
+    #[test]
+    fn symbolic_defaults_to_balanced_profile() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.profile, SymbolicProfile::Balanced);
+        assert_eq!(args.input_combination_cap, None);
+        assert_eq!(args.path_cap, None);
+        assert_eq!(args.timeout, None);
+    }
+
+    #[test]
+    fn symbolic_accepts_explicit_caps_and_profile() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "symbolic",
+            "--contract",
+            "contract.wasm",
+            "--function",
+            "increment",
+            "--profile",
+            "deep",
+            "--input-combination-cap",
+            "512",
+            "--path-cap",
+            "200",
+            "--timeout",
+            "45",
+        ]);
+
+        let Commands::Symbolic(args) = cli.command.expect("symbolic command expected") else {
+            panic!("symbolic command expected");
+        };
+
+        assert_eq!(args.profile, SymbolicProfile::Deep);
+        assert_eq!(args.input_combination_cap, Some(512));
+        assert_eq!(args.path_cap, Some(200));
+        assert_eq!(args.timeout, Some(45));
+    }
+
+    #[test]
+    fn scenario_accepts_optional_timeout_override() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "scenario",
+            "--scenario",
+            "scenario.toml",
+            "--contract",
+            "contract.wasm",
+            "--timeout",
+            "0",
+        ]);
+
+        let Commands::Scenario(args) = cli.command.expect("scenario command expected") else {
+            panic!("scenario command expected");
+        };
+
+        assert_eq!(args.timeout, Some(0));
+    }
+
+    #[test]
+    fn inspect_accepts_source_map_diagnostics_flags() {
+        let cli = Cli::parse_from([
+            "soroban-debug",
+            "inspect",
+            "--contract",
+            "contract.wasm",
+            "--source-map-diagnostics",
+            "--source-map-limit",
+            "5",
+            "--format",
+            "json",
+        ]);
+
+        let Commands::Inspect(args) = cli.command.expect("inspect command expected") else {
+            panic!("inspect command expected");
+        };
+
+        assert!(args.source_map_diagnostics);
+        assert_eq!(args.source_map_limit, 5);
+        assert_eq!(args.format, OutputFormat::Json);
+    }
 }
 
 #[derive(Parser)]
@@ -600,6 +881,16 @@ pub struct CompareArgs {
     /// Output file for the comparison report (default: stdout)
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Ignore a JSON path during comparison. Repeatable. Paths are slash-delimited,
+    /// for example: /storage/fee_pool or /return_value/meta/timestamp
+    #[arg(long, value_name = "PATH")]
+    pub ignore_path: Vec<String>,
+
+    /// Ignore an object field name anywhere in the trace during comparison.
+    /// Repeatable. Useful for timestamps, sequence numbers, and similar metadata.
+    #[arg(long, value_name = "FIELD")]
+    pub ignore_field: Vec<String>,
 }
 
 /// Arguments for the TUI dashboard subcommand
@@ -655,6 +946,11 @@ pub struct ProfileArgs {
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
+
+    /// Export format for profiler output (report|folded-stack|json)
+    #[arg(long, value_enum, default_value_t = ProfileExportFormat::Report)]
+    pub export_format: ProfileExportFormat,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -673,6 +969,53 @@ pub struct SymbolicArgs {
     /// Output file for the scenario TOML
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Preset symbolic exploration budget profile
+    #[arg(long, value_enum, default_value_t = SymbolicProfile::Balanced)]
+    pub profile: SymbolicProfile,
+
+    /// Maximum number of input combinations to generate deterministically
+    #[arg(long, value_name = "N")]
+    pub input_combination_cap: Option<usize>,
+
+    /// Maximum number of generated inputs to execute
+    #[arg(long, value_name = "N")]
+    pub path_cap: Option<usize>,
+
+    /// Legacy alias for controlling generated-value branching width.
+    /// Preserved for backward-compatible CLI parsing.
+    #[arg(long, value_name = "N")]
+    pub max_breadth: Option<usize>,
+
+    /// Maximum time for symbolic analysis, in seconds.
+    /// When omitted, the budget is controlled by --profile.
+    /// The command exits with a non-zero status code if this limit is exceeded.
+    /// Use 0 to disable the timeout entirely.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<u64>,
+
+    /// Seed the exploration order with this integer so the run is fully
+    /// reproducible.  The emitted "Replay token" value can be passed here
+    /// or to `--replay` on any subsequent run to reproduce the exact same
+    /// path ordering.  Mutually exclusive with `--replay`.
+    #[arg(long, value_name = "N", conflicts_with = "replay")]
+    pub seed: Option<u64>,
+
+    /// Replay a previous symbolic run by providing its replay token (the seed
+    /// value printed at the end of the original run).  Equivalent to
+    /// `--seed <TOKEN>`.  Mutually exclusive with `--seed`.
+    #[arg(long, value_name = "TOKEN", conflicts_with = "seed")]
+    pub replay: Option<u64>,
+
+    /// Path to a JSON file containing initial storage state to seed before
+    /// symbolic exploration. This allows testing how different storage states
+    /// affect contract behavior. The JSON should be a map of key-value pairs.
+    #[arg(long, value_name = "FILE")]
+    pub storage_seed: Option<PathBuf>,
+
+    /// Output format for the report (pretty/text or json)
+    #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+    pub format: OutputFormat,
 }
 
 #[derive(Parser)]
@@ -700,6 +1043,10 @@ pub struct ReplayArgs {
 
 #[derive(Parser)]
 pub struct ServerArgs {
+    /// Host/interface to bind
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value = "9229")]
     pub port: u16,
@@ -715,6 +1062,14 @@ pub struct ServerArgs {
     /// TLS private key file path (optional)
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
+
+    /// Repeat execution N times and show throughput/latency stats
+    #[arg(long, value_name = "N")]
+    pub repeat: Option<u32>,
+
+    /// Filter storage view to only show keys matching pattern (repeatable)
+    #[arg(long, value_name = "PATTERN")]
+    pub storage_filter: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -735,9 +1090,48 @@ pub struct RemoteArgs {
     #[arg(short, long)]
     pub function: Option<String>,
 
+    /// TLS certificate file path (optional)
+    #[arg(long)]
+    pub tls_cert: Option<PathBuf>,
+
+    /// TLS private key file path (optional)
+    #[arg(long)]
+    pub tls_key: Option<PathBuf>,
+
+    /// TLS CA certificate file path (optional, for self-signed certs)
+    #[arg(long)]
+    pub tls_ca: Option<PathBuf>,
+
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Remote operation to perform (default: execute or ping)
+    #[command(subcommand)]
+    pub action: Option<RemoteAction>,
+}
+
+#[derive(Subcommand)]
+pub enum RemoteAction {
+    /// Inspect current execution state (function, step count, call stack)
+    Inspect,
+
+    /// Get contract storage state as JSON
+    Storage,
+
+    /// Evaluate an expression in the current debug context
+    Evaluate(RemoteEvaluateArgs),
+}
+
+#[derive(Parser)]
+pub struct RemoteEvaluateArgs {
+    /// Expression to evaluate
+    #[arg(short, long)]
+    pub expression: String,
+
+    /// Stack frame ID for evaluation context (optional)
+    #[arg(long)]
+    pub frame_id: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -758,9 +1152,25 @@ pub struct AnalyzeArgs {
     #[arg(short, long)]
     pub storage: Option<String>,
 
+    /// Execution timeout in seconds for dynamic analysis (default: 30)
+    #[arg(long, default_value = "30")]
+    pub timeout: u64,
+
     /// Output format (text, json)
     #[arg(long, default_value = "text")]
     pub format: String,
+
+    /// Enable only the specified rule id(s). Repeatable.
+    #[arg(long, value_name = "RULE_ID")]
+    pub enable_rule: Vec<String>,
+
+    /// Disable the specified rule id(s). Repeatable.
+    #[arg(long, value_name = "RULE_ID")]
+    pub disable_rule: Vec<String>,
+
+    /// Minimum severity to include: low, medium, or high.
+    #[arg(long, default_value = "low", value_name = "SEVERITY")]
+    pub min_severity: String,
 }
 
 #[derive(Parser)]
@@ -776,4 +1186,9 @@ pub struct ScenarioArgs {
     /// Initial storage state as JSON object
     #[arg(long)]
     pub storage: Option<String>,
+
+    /// Default execution timeout in seconds for steps that do not override it.
+    /// Use 0 to disable the timeout entirely.
+    #[arg(long)]
+    pub timeout: Option<u64>,
 }
