@@ -590,22 +590,20 @@ impl SecurityRule for AuthorizationCheckRule {
                     } else {
                         problematic_writes.push((entry.clone(), format!("Storage mutation detected without any preceding authorization in function '{}' frame '{}'.", function_name, frame.function.as_deref().unwrap_or("unknown"))));
                     }
-                } else {
-                    if let Some(authorized_actors) = auth_actors_per_function.get(&function_name) {
-                        if let Some(key) = &entry.storage_key {
-                            let covered = authorized_actors.keys().any(|addr| key.contains(addr));
-                            if !covered && !authorized_actors.is_empty() {
-                                problematic_writes.push((entry.clone(), format!(
-                                    "Storage mutation to key '{}' detected without relevant authorization in function '{}'. Authorized actors: {:?}",
-                                    key,
-                                    function_name,
-                                    authorized_actors.keys().collect::<Vec<_>>()
-                                )));
-                            }
+                } else if let Some(authorized_actors) = auth_actors_per_function.get(&function_name) {
+                    if let Some(key) = &entry.storage_key {
+                        let covered = authorized_actors.keys().any(|addr| key.contains(addr));
+                        if !covered && !authorized_actors.is_empty() {
+                            problematic_writes.push((entry.clone(), format!(
+                                "Storage mutation to key '{}' detected without relevant authorization in function '{}'. Authorized actors: {:?}",
+                                key,
+                                function_name,
+                                authorized_actors.keys().collect::<Vec<_>>()
+                            )));
                         }
-                    } else {
-                        problematic_writes.push((entry.clone(), format!("Storage mutation detected without frame metadata or preceding authorization in function '{}'.", function_name)));
                     }
+                } else {
+                    problematic_writes.push((entry.clone(), format!("Storage mutation detected without frame metadata or preceding authorization in function '{}'.", function_name)));
                 }
             }
         }

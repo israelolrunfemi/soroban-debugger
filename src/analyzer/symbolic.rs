@@ -559,7 +559,7 @@ impl SymbolicAnalyzer {
                     if inner_seeds.len() > 1 {
                         seeds.push(format!("[{}, {}]", inner_seeds[0], inner_seeds[1]));
                     }
-                    if inner_seeds.len() > 0 {
+                    if !inner_seeds.is_empty() {
                         // Add one more variant if possible
                         seeds.push(format!("[{}, {}]", inner_seeds[0], inner_seeds[0]));
                     }
