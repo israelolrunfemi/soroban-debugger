@@ -488,17 +488,15 @@ impl DebuggerEngine {
         } else {
             false
         };
-        crate::plugin::registry::dispatch_global_event(
-            &ExecutionEvent::AfterFunctionCall {
-                function: function.to_string(),
-                result: event_result,
-                duration,
-            },
-            &mut plugin_ctx,
-        );
+        self.paused = stepped;
+        Ok(stepped)
+    }
 
-        if let Err(ref e) = result {
-            tracing::error!("Execution failed: {}", e);
+    /// Step back to previous instruction.
+    pub fn step_back(&mut self) -> Result<bool> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
 
         let stepped = if let Ok(mut state) = self.state.lock() {
             self.stepper.step_back(&mut state)
@@ -621,4 +619,4 @@ impl DebuggerEngine {
 }
 
 #[cfg(test)]
-mod tests;
+mod engine_test;
