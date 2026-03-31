@@ -448,11 +448,11 @@ pub fn check_api_version(plugin_version: u32) -> Result<(), crate::plugin::api::
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::manifest::PluginSignature;
+    use super::*;
+    use crate::plugin::api::{PluginError, PLUGIN_API_VERSION};
     use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
     use base64::Engine;
-    use crate::plugin::api::{PluginError, PLUGIN_API_VERSION};
     use ed25519_dalek::{Signer, SigningKey};
     use std::collections::BTreeSet;
     use std::path::Path;

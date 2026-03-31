@@ -197,8 +197,11 @@ impl DebugServer {
 
         loop {
             let next_message = if let Some(timeout) = idle_timeout {
-                match tokio::time::timeout(std::time::Duration::from_millis(timeout as u64), rx_in.recv())
-                    .await
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout as u64),
+                    rx_in.recv(),
+                )
+                .await
                 {
                     Ok(res) => res,
                     Err(_) => {
@@ -278,10 +281,9 @@ impl DebugServer {
                             let tx_heartbeat = tx_out.clone();
                             let interval_ms = interval as u64;
                             _heartbeat_timer = Some(tokio::spawn(async move {
-                                let mut interval_timer =
-                                    tokio::time::interval(std::time::Duration::from_millis(
-                                        interval_ms,
-                                    ));
+                                let mut interval_timer = tokio::time::interval(
+                                    std::time::Duration::from_millis(interval_ms),
+                                );
                                 // Avoid immediate tick if possible, though tokio interval ticks first.
                                 interval_timer.tick().await;
 
@@ -305,7 +307,7 @@ impl DebugServer {
                                 server_version,
                                 protocol_min: PROTOCOL_MIN_VERSION,
                                 protocol_max: PROTOCOL_MAX_VERSION,
-                                selected_version: selected_version,
+                                selected_version,
                                 heartbeat_interval_ms: *heartbeat_interval_ms,
                                 idle_timeout_ms: idle_timeout,
                             },
@@ -610,16 +612,12 @@ impl DebugServer {
                                             },
                                         }
                                     } else {
-                                        is_executing.store(
-                                            true,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                        );
+                                        is_executing
+                                            .store(true, std::sync::atomic::Ordering::SeqCst);
                                         let resp =
                                             execute_without_breakpoints(engine, &function, args);
-                                        is_executing.store(
-                                            false,
-                                            std::sync::atomic::Ordering::SeqCst,
-                                        );
+                                        is_executing
+                                            .store(false, std::sync::atomic::Ordering::SeqCst);
                                         resp
                                     }
                                 }
@@ -643,32 +641,62 @@ impl DebugServer {
                                                     println!("{message}");
                                                 }
                                                 if hit.should_pause {
-                                                    engine.prepare_breakpoint_stop(&function, args.as_deref());
-                                                    self.pending_execution = Some(PendingExecution { function: function.clone(), args: args.clone() });
+                                                    engine.prepare_breakpoint_stop(
+                                                        &function,
+                                                        args.as_deref(),
+                                                    );
+                                                    self.pending_execution =
+                                                        Some(PendingExecution {
+                                                            function: function.clone(),
+                                                            args: args.clone(),
+                                                        });
                                                     DebugResponse::ExecutionResult {
                                                         success: true,
-                                                        output: "Paused at function breakpoint".to_string(),
+                                                        output: "Paused at function breakpoint"
+                                                            .to_string(),
                                                         error: None,
                                                         paused: true,
                                                         completed: false,
-                                                        source_location: engine.current_source_location().map(Into::into),
+                                                        source_location: engine
+                                                            .current_source_location()
+                                                            .map(Into::into),
                                                     }
                                                 } else {
-                                                    is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                                                    let resp = execute_without_breakpoints(engine, &function, args);
-                                                    is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                    is_executing.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    let resp = execute_without_breakpoints(
+                                                        engine, &function, args,
+                                                    );
+                                                    is_executing.store(
+                                                        false,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
                                                     resp
                                                 }
                                             }
                                             Ok(None) => {
-                                                is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                                                let resp = execute_without_breakpoints(engine, &function, args);
-                                                is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                is_executing.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                let resp = execute_without_breakpoints(
+                                                    engine, &function, args,
+                                                );
+                                                is_executing.store(
+                                                    false,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
                                                 resp
                                             }
-                                            Err(e) => DebugResponse::Error { message: e.to_string() },
+                                            Err(e) => DebugResponse::Error {
+                                                message: e.to_string(),
+                                            },
                                         },
-                                        Err(e) => DebugResponse::Error { message: e.to_string() },
+                                        Err(e) => DebugResponse::Error {
+                                            message: e.to_string(),
+                                        },
                                     }
                                 } else {
                                     is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -682,7 +710,7 @@ impl DebugServer {
                             },
                         }
                     }
-                },
+                }
                 DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
@@ -768,7 +796,9 @@ impl DebugServer {
                                     paused: false,
                                     current_function,
                                     step_count,
-                                    source_location: engine.current_source_location().map(Into::into),
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                                 Err(e) => DebugResponse::Error {
                                     message: e.to_string(),
@@ -791,7 +821,9 @@ impl DebugServer {
                                         paused: engine.is_paused(),
                                         current_function,
                                         step_count,
-                                        source_location: engine.current_source_location().map(Into::into),
+                                        source_location: engine
+                                            .current_source_location()
+                                            .map(Into::into),
                                     }
                                 }
                                 Err(e) => DebugResponse::Error {
@@ -842,14 +874,18 @@ impl DebugServer {
                                     output: Some(output),
                                     error: None,
                                     paused: false,
-                                    source_location: engine.current_source_location().map(Into::into),
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
                                     output: None,
                                     error: Some(e.to_string()),
                                     paused: false,
-                                    source_location: engine.current_source_location().map(Into::into),
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                             }
                         } else {
@@ -859,14 +895,18 @@ impl DebugServer {
                                     output: None,
                                     error: None,
                                     paused: engine.is_paused(),
-                                    source_location: engine.current_source_location().map(Into::into),
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
                                     output: None,
                                     error: Some(e.to_string()),
                                     paused: engine.is_paused(),
-                                    source_location: engine.current_source_location().map(Into::into),
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                             }
                         }
@@ -876,41 +916,39 @@ impl DebugServer {
                     },
                 },
                 DebugRequest::Inspect => match self.engine.as_ref() {
-                    Some(engine) => {
-                        match engine.state().lock() {
-                            Ok(state) => {
-                                let call_stack = state
-                                    .call_stack()
-                                    .get_stack()
-                                    .iter()
-                                    .map(|frame| {
-                                        let suffix = frame
-                                            .contract_id
-                                            .as_ref()
-                                            .map(|id| format!(" [{}]", id))
-                                            .unwrap_or_default();
-                                        format!("{}{}", frame.function, suffix)
-                                    })
-                                    .collect();
-                                let function = state.current_function().map(|s| s.to_string());
-                                let args = state.current_args().map(|s| s.to_string());
-                                let step_count = state.step_count() as u64;
-                                drop(state);
+                    Some(engine) => match engine.state().lock() {
+                        Ok(state) => {
+                            let call_stack = state
+                                .call_stack()
+                                .get_stack()
+                                .iter()
+                                .map(|frame| {
+                                    let suffix = frame
+                                        .contract_id
+                                        .as_ref()
+                                        .map(|id| format!(" [{}]", id))
+                                        .unwrap_or_default();
+                                    format!("{}{}", frame.function, suffix)
+                                })
+                                .collect();
+                            let function = state.current_function().map(|s| s.to_string());
+                            let args = state.current_args().map(|s| s.to_string());
+                            let step_count = state.step_count() as u64;
+                            drop(state);
 
-                                DebugResponse::InspectionResult {
-                                    function,
-                                    args,
-                                    step_count,
-                                    paused: engine.is_paused(),
-                                    call_stack,
-                                    source_location: engine.current_source_location().map(Into::into),
-                                }
+                            DebugResponse::InspectionResult {
+                                function,
+                                args,
+                                step_count,
+                                paused: engine.is_paused(),
+                                call_stack,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
-                            Err(e) => DebugResponse::Error {
-                                message: format!("Failed to acquire state lock: {}", e),
-                            },
                         }
-                    }
+                        Err(e) => DebugResponse::Error {
+                            message: format!("Failed to acquire state lock: {}", e),
+                        },
+                    },
                     None => DebugResponse::Error {
                         message: "No contract loaded".to_string(),
                     },
@@ -919,11 +957,10 @@ impl DebugServer {
                     Some(engine) => match engine.executor().get_storage_snapshot() {
                         Ok(mut snapshot) => {
                             if !self.storage_filter.is_empty() {
-                                if let Ok(filter) = crate::inspector::storage::StorageFilter::new(&self.storage_filter) {
-                                    snapshot = snapshot
-                                        .into_iter()
-                                        .filter(|(k, _)| filter.matches(k))
-                                        .collect();
+                                if let Ok(filter) = crate::inspector::storage::StorageFilter::new(
+                                    &self.storage_filter,
+                                ) {
+                                    snapshot.retain(|k, _| filter.matches(k));
                                 }
                             }
                             match serde_json::to_string(&snapshot) {
@@ -1308,14 +1345,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_on_signal() {
-        let server = DebugServer::new(
-            "127.0.0.1".to_string(),
-            None,
-            None,
-            None,
-            None,
-            Vec::new(),
-        )
+        let server = DebugServer::new("127.0.0.1".to_string(), None, None, None, None, Vec::new())
             .expect("Failed to create server");
         let shutdown = server.shutdown.clone();
 
@@ -1339,14 +1369,7 @@ mod tests {
 
     #[test]
     fn test_server_initialization() {
-        let server = DebugServer::new(
-            "127.0.0.1".to_string(),
-            None,
-            None,
-            None,
-            None,
-            Vec::new(),
-        )
+        let server = DebugServer::new("127.0.0.1".to_string(), None, None, None, None, Vec::new())
             .expect("Failed to create server");
         assert_eq!(server.host, "127.0.0.1");
         assert!(server.engine.is_none());
@@ -1379,8 +1402,13 @@ mod tests {
             None,
             Vec::new(),
         );
-        assert!(result.is_err(), "Expected partial TLS configuration to fail");
-        let err = result.err().unwrap_or_else(|| miette::miette!("missing error"));
+        assert!(
+            result.is_err(),
+            "Expected partial TLS configuration to fail"
+        );
+        let err = result
+            .err()
+            .unwrap_or_else(|| miette::miette!("missing error"));
 
         assert!(
             err.to_string()

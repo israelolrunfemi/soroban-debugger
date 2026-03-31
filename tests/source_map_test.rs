@@ -83,8 +83,13 @@ fn test_source_map_multiple_files() {
 fn test_no_debug_info_reason_code() {
     let sm = SourceMap::new();
     let exported: HashSet<String> = HashSet::new();
-    let results =
-        sm.resolve_source_breakpoints(MINIMAL_WASM, &PathBuf::from("src/lib.rs"), &[5], &exported, None);
+    let results = sm.resolve_source_breakpoints(
+        MINIMAL_WASM,
+        &PathBuf::from("src/lib.rs"),
+        &[5],
+        &exported,
+        None,
+    );
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].reason_code, "NO_DEBUG_INFO");
     assert!(!results[0].verified);
@@ -106,8 +111,13 @@ fn test_file_not_in_debug_info_reason_code() {
         },
     );
     let exported: HashSet<String> = HashSet::new();
-    let results =
-        sm.resolve_source_breakpoints(MINIMAL_WASM, &PathBuf::from("src/lib.rs"), &[5], &exported, None);
+    let results = sm.resolve_source_breakpoints(
+        MINIMAL_WASM,
+        &PathBuf::from("src/lib.rs"),
+        &[5],
+        &exported,
+        None,
+    );
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].reason_code, "FILE_NOT_IN_DEBUG_INFO");
     assert!(!results[0].verified);

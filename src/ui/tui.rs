@@ -245,9 +245,7 @@ impl DebuggerUI {
                 );
             }
             crate::logging::log_display("", crate::logging::LogLevel::Info);
-            crate::inspector::CallStackInspector::display_frames(
-                state.call_stack().get_stack(),
-            );
+            crate::inspector::CallStackInspector::display_frames(state.call_stack().get_stack());
         } else {
             crate::logging::log_display("State unavailable", crate::logging::LogLevel::Info);
         }

@@ -680,7 +680,7 @@ pub fn run(args: RunArgs, verbosity: Verbosity) -> Result<()> {
             return Ok(());
         }
     }
-    
+
     print_info("\n--- Execution Start ---\n");
     output_writer.write("\n--- Execution Start ---\n")?;
     let storage_before = engine.executor().get_storage_snapshot()?;
@@ -1844,7 +1844,8 @@ pub fn remote(args: RemoteArgs, _verbosity: Verbosity) -> Result<()> {
         tls_ca: args.tls_ca.clone(),
         ..Default::default()
     };
-    let mut client = crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
+    let mut client =
+        crate::client::RemoteClient::connect_with_config(&args.remote, args.token.clone(), config)?;
 
     if let Some(contract) = &args.contract {
         print_info(format!("Loading contract: {:?}", contract));

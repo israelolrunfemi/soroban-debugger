@@ -590,7 +590,8 @@ impl SecurityRule for AuthorizationCheckRule {
                     } else {
                         problematic_writes.push((entry.clone(), format!("Storage mutation detected without any preceding authorization in function '{}' frame '{}'.", function_name, frame.function.as_deref().unwrap_or("unknown"))));
                     }
-                } else if let Some(authorized_actors) = auth_actors_per_function.get(&function_name) {
+                } else if let Some(authorized_actors) = auth_actors_per_function.get(&function_name)
+                {
                     if let Some(key) = &entry.storage_key {
                         let covered = authorized_actors.keys().any(|addr| key.contains(addr));
                         if !covered && !authorized_actors.is_empty() {

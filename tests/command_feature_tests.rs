@@ -739,13 +739,13 @@ fn run_export_storage_performs_single_export() {
         export_path
     );
 
-    let exported_content = fs::read_to_string(export_path)
-        .expect("Failed to read exported storage file");
-    
+    let exported_content =
+        fs::read_to_string(export_path).expect("Failed to read exported storage file");
+
     // Verify it's valid JSON
     let _: serde_json::Value = serde_json::from_str(&exported_content)
         .expect("Exported storage file does not contain valid JSON");
-    
+
     // Verify success message with entry count appears.
     let has_success_message = combined.contains("Exported") && combined.contains("storage entries");
     assert!(

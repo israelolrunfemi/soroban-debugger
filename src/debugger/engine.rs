@@ -38,7 +38,10 @@ impl EngineConditionEvaluator {
         Self { storage }
     }
 
-    fn parse_condition<'a>(&self, condition: &'a str) -> crate::Result<(&'a str, &'a str, &'a str)> {
+    fn parse_condition<'a>(
+        &self,
+        condition: &'a str,
+    ) -> crate::Result<(&'a str, &'a str, &'a str)> {
         let condition = condition.trim();
         let (var, op, value) = if let Some(pos) = condition.find(">=") {
             let (var, rest) = condition.split_at(pos);
@@ -385,7 +388,8 @@ impl DebuggerEngine {
                 if let Some(first_topic) = self.get_first_event_topic(&event) {
                     if first_topic == "fn_call" {
                         // This is a cross-contract call
-                        let contract_id = event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
+                        let contract_id =
+                            event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
                         stack.push("nested_call".to_string(), contract_id);
                     } else if first_topic == "fn_return" && stack.get_stack().len() > 1 {
                         // This is a return from a cross-contract call
@@ -404,7 +408,10 @@ impl DebuggerEngine {
     }
 
     /// Extract the first topic from a ContractEvent as a string, if available
-    fn get_first_event_topic(&self, event: &soroban_env_host::xdr::ContractEvent) -> Option<String> {
+    fn get_first_event_topic(
+        &self,
+        event: &soroban_env_host::xdr::ContractEvent,
+    ) -> Option<String> {
         match &event.body {
             soroban_env_host::xdr::ContractEventBody::V0(v0) => {
                 if let Some(first_topic) = v0.topics.first() {

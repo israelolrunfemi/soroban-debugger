@@ -5,7 +5,11 @@ use std::time::Duration;
 // Note: Requires the soroban-debug binary to be built (cargo build --bins)
 
 fn get_free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
 }
 
 fn spawn_server(port: u16, token: &str) -> std::process::Child {
@@ -15,7 +19,7 @@ fn spawn_server(port: u16, token: &str) -> std::process::Child {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("Failed to spawn soroban-debug server");
-    
+
     // Brief wait to see if it crashes immediately
     std::thread::sleep(Duration::from_millis(200));
     if let Ok(Some(status)) = child.try_wait() {
@@ -23,7 +27,10 @@ fn spawn_server(port: u16, token: &str) -> std::process::Child {
         if let Some(mut err_pipe) = child.stderr.take() {
             let _ = std::io::Read::read_to_string(&mut err_pipe, &mut stderr);
         }
-        panic!("Server exited immediately with status {:?}. Stderr: {}", status, stderr);
+        panic!(
+            "Server exited immediately with status {:?}. Stderr: {}",
+            status, stderr
+        );
     }
     child
 }
@@ -43,7 +50,8 @@ fn connect_with_retry(port: u16) -> Result<TcpStream, std::io::Error> {
             }
         }
     }
-    Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect")))
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "Failed to connect")))
 }
 
 #[test]
@@ -66,7 +74,11 @@ fn test_heartbeat_negotiation() {
         let mut response = String::new();
         reader.read_line(&mut response)?;
 
-        assert!(response.contains("HandshakeAck"), "Expected HandshakeAck, got: {}", response);
+        assert!(
+            response.contains("HandshakeAck"),
+            "Expected HandshakeAck, got: {}",
+            response
+        );
         assert!(response.contains("\"heartbeat_interval_ms\":100"));
         assert!(response.contains("\"idle_timeout_ms\":500"));
 
@@ -101,7 +113,11 @@ fn test_server_sends_heartbeats() {
         // 2. Wait for heartbeat from server
         response.clear();
         reader.read_line(&mut response)?;
-        assert!(response.contains("\"type\":\"Ping\""), "Expected Ping (heartbeat) from server, got: {}", response);
+        assert!(
+            response.contains("\"type\":\"Ping\""),
+            "Expected Ping (heartbeat) from server, got: {}",
+            response
+        );
 
         // 3. Respond with Pong
         let pong = "{\"id\":0,\"response\":{\"type\":\"Pong\"}}\n";
@@ -110,7 +126,11 @@ fn test_server_sends_heartbeats() {
         // 4. Wait for another heartbeat
         response.clear();
         reader.read_line(&mut response)?;
-        assert!(response.contains("\"type\":\"Ping\""), "Expected second Ping from server, got: {}", response);
+        assert!(
+            response.contains("\"type\":\"Ping\""),
+            "Expected second Ping from server, got: {}",
+            response
+        );
 
         Ok(())
     })();
@@ -143,14 +163,21 @@ fn test_idle_timeout_disconnects_client() {
         // 2. Wait for timeout and Disconnected message
         response.clear();
         reader.read_line(&mut response)?;
-        assert!(response.contains("Disconnected"), "Expected Disconnected message due to idle timeout, got: {}", response);
+        assert!(
+            response.contains("Disconnected"),
+            "Expected Disconnected message due to idle timeout, got: {}",
+            response
+        );
 
         // 3. Verify connection is closed
         response.clear();
         match reader.read_line(&mut response) {
-            Ok(0) => {}, // Graceful EOF
-            Err(_) => {}, // Connection reset or other error after DISCONNECT
-            Ok(n) => panic!("Expected connection closure, but got {} bytes: {}", n, response),
+            Ok(0) => {}  // Graceful EOF
+            Err(_) => {} // Connection reset or other error after DISCONNECT
+            Ok(n) => panic!(
+                "Expected connection closure, but got {} bytes: {}",
+                n, response
+            ),
         }
 
         Ok(())

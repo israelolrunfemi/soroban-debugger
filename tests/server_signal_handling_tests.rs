@@ -63,7 +63,9 @@ fn test_server_accepts_both_tls_paths_for_loading() {
         result.is_err(),
         "expected missing fixture files to fail during TLS load"
     );
-    let err = result.err().unwrap_or_else(|| miette::miette!("missing error"));
+    let err = result
+        .err()
+        .unwrap_or_else(|| miette::miette!("missing error"));
 
     assert!(
         !err.to_string()

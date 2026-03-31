@@ -572,7 +572,10 @@ impl ContractExecutor {
         let mut next_sequence = out.iter().map(|e| e.sequence).max().map_or(0, |n| n + 1);
         for event in self.get_diagnostic_events().unwrap_or_default() {
             let message = format!("{:?}", event);
-            if out.iter().any(|e| e.message.contains(&message) || message.contains(&e.message)) {
+            if out
+                .iter()
+                .any(|e| e.message.contains(&message) || message.contains(&e.message))
+            {
                 continue;
             }
 

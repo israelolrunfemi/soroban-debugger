@@ -163,7 +163,10 @@ impl RemoteClient {
                 })?;
                 let mut reader = BufReader::new(ca_file);
                 let certs = rustls_pemfile::certs(&mut reader).map_err(|e| {
-                    DebuggerError::FileError(format!("Failed to parse CA cert {:?}: {}", ca_path, e))
+                    DebuggerError::FileError(format!(
+                        "Failed to parse CA cert {:?}: {}",
+                        ca_path, e
+                    ))
                 })?;
                 for cert in certs {
                     root_store.add(&Certificate(cert)).map_err(|e| {
@@ -176,36 +179,53 @@ impl RemoteClient {
                     DebuggerError::NetworkError(format!("Failed to load native certs: {}", e))
                 })? {
                     root_store.add(&Certificate(cert.0)).map_err(|e| {
-                        DebuggerError::FileError(format!("Failed to add native cert to root store: {}", e))
+                        DebuggerError::FileError(format!(
+                            "Failed to add native cert to root store: {}",
+                            e
+                        ))
                     })?;
                 }
             }
 
-            let client_config = if let (Some(ref cert_path), Some(ref key_path)) = (&config.tls_cert, &config.tls_key) {
+            let client_config = if let (Some(ref cert_path), Some(ref key_path)) =
+                (&config.tls_cert, &config.tls_key)
+            {
                 let cert_file = std::fs::File::open(cert_path).map_err(|e| {
-                    DebuggerError::FileError(format!("Failed to open client cert {:?}: {}", cert_path, e))
+                    DebuggerError::FileError(format!(
+                        "Failed to open client cert {:?}: {}",
+                        cert_path, e
+                    ))
                 })?;
                 let mut cert_reader = BufReader::new(cert_file);
                 let certs: Vec<Certificate> = rustls_pemfile::certs(&mut cert_reader)
-                    .map_err(|e| DebuggerError::FileError(format!("Failed to parse client cert: {}", e)))?
+                    .map_err(|e| {
+                        DebuggerError::FileError(format!("Failed to parse client cert: {}", e))
+                    })?
                     .into_iter()
                     .map(Certificate)
                     .collect();
 
                 let key_file = std::fs::File::open(key_path).map_err(|e| {
-                    DebuggerError::FileError(format!("Failed to open client key {:?}: {}", key_path, e))
+                    DebuggerError::FileError(format!(
+                        "Failed to open client key {:?}: {}",
+                        key_path, e
+                    ))
                 })?;
                 let mut key_reader = BufReader::new(key_file);
-                let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader)
-                    .map_err(|e| DebuggerError::FileError(format!("Failed to parse client key: {}", e)))?;
-                
+                let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader).map_err(|e| {
+                    DebuggerError::FileError(format!("Failed to parse client key: {}", e))
+                })?;
+
                 if let Some(key) = keys.into_iter().next() {
                     ClientConfig::builder()
                         .with_safe_defaults()
                         .with_root_certificates(root_store)
                         .with_client_auth_cert(certs, PrivateKey(key))
                         .map_err(|e| {
-                            DebuggerError::FileError(format!("Failed to set client certificate: {}", e))
+                            DebuggerError::FileError(format!(
+                                "Failed to set client certificate: {}",
+                                e
+                            ))
                         })?
                 } else {
                     ClientConfig::builder()
@@ -225,9 +245,10 @@ impl RemoteClient {
                 DebuggerError::NetworkError(format!("Invalid server name '{}': {}", host, e))
             })?;
 
-            let conn = rustls::client::ClientConnection::new(Arc::new(client_config), server_name).map_err(|e| {
-                DebuggerError::NetworkError(format!("Failed to create TLS connection: {}", e))
-            })?;
+            let conn = rustls::client::ClientConnection::new(Arc::new(client_config), server_name)
+                .map_err(|e| {
+                    DebuggerError::NetworkError(format!("Failed to create TLS connection: {}", e))
+                })?;
 
             Ok(RemoteStream::Tls(Box::new(rustls::StreamOwned::new(
                 conn, tcp_stream,
@@ -236,8 +257,6 @@ impl RemoteClient {
             Ok(RemoteStream::Plain(tcp_stream))
         }
     }
-
-
 
     /// Perform a protocol handshake and verify compatibility.
     pub fn handshake(&mut self, client_name: &str, client_version: &str) -> Result<u32> {
@@ -574,7 +593,11 @@ impl RemoteClient {
     }
 
     /// Evaluate an expression in the current debug context
-    pub fn evaluate(&mut self, expression: &str, frame_id: Option<u64>) -> Result<(String, Option<String>)> {
+    pub fn evaluate(
+        &mut self,
+        expression: &str,
+        frame_id: Option<u64>,
+    ) -> Result<(String, Option<String>)> {
         let response = self.send_request_with_retry(
             DebugRequest::Evaluate {
                 expression: expression.to_string(),
