@@ -81,8 +81,8 @@ Legend:
 | Configure server port | `--port <n>` on `server` command | YES — `"port"` in `launch.json` | |
 | Configure auth token | `--token <t>` on `server` command | YES — `"token"` in `launch.json` | |
 | Connect as remote client | `soroban-debug remote --remote <host:port>` | YES — `"request": "attach"` in `launch.json` | Set `request: "attach"`, `host`, and `port` in `launch.json`. The extension connects to the pre-existing server without spawning a subprocess. |
-| TLS encryption — server | `--tls-cert <file> --tls-key <file>` on `server` | YES — CLI flags | Pass `--tls-cert/--tls-key` when spawning the server. |
-| TLS encryption — client | `--tls-cert`/`--tls-key`/`--tls-ca` on `remote` | YES | CLI flags for `remote` subcommand. |
+| TLS encryption — server | `--tls-cert <file> --tls-key <file>` on `server` | YES — `"tlsCert"`, `"tlsKey"` in `launch.json` | Pass `--tls-cert/--tls-key` when spawning the server via `launch`. |
+| TLS encryption — client | `--tls-cert`/`--tls-key`/`--tls-ca` on `remote` | YES — `"tlsCert"`, `"tlsKey"` in `launch.json` | Pass `"tlsCert"` and `"tlsKey"` when attaching to a remote server. |
 
 ---
 
@@ -90,7 +90,7 @@ Legend:
 
 | Feature | CLI flag / command | VS Code Extension | Notes |
 |---|---|---|---|
-| Batch arguments from file | `--batch-args <file.json>` | NO | No `batchArgs` field in `launch.json`. |
+| Batch arguments from file | `--batch-args <file.json>` | YES — `"batchArgs"` in `launch.json` | Each argument set is executed separately; results and summary shown in Debug Console. |
 | Repeat execution N times | `--repeat <n>` | YES — `"repeat"` in `launch.json` | Execution runs N times; aggregate stats shown in Debug Console. |
 
 ---
@@ -133,14 +133,15 @@ For VS Code users, this table maps CLI flags to their `launch.json` equivalents.
 | `--instruction-debug` | (none) | NO |
 | `--step-instructions` | (none) | NO |
 | `--step-mode` | (none) | NO |
-| `--batch-args` | (none) | NO |
+| `--batch-args` | `batchArgs` | YES |
 | `--repeat` | `repeat` | YES |
-| `--tls-cert` / `--tls-key` | Passed via CLI arguments | YES |
+| `--tls-cert` | `tlsCert` | YES |
+| `--tls-key` | `tlsKey` | YES |
 | `--import-storage` | Use `snapshotPath` instead | PARTIAL |
 | `--export-storage` | (none) | NO |
 | `--show-events` | (none) | NO |
 | `--event-filter` | (none) | NO |
-| `--dry-run` | (none) | NO |
+| `--dry-run` | `dryRun` | YES |
 | `--mock` | (none) | NO |
 
 ---

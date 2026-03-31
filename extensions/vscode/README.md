@@ -27,7 +27,7 @@ A Visual Studio Code extension that integrates the Soroban smart contract debugg
 1. Clone the soroban-debugger repository:
 
 ```bash
-git clone https://github.com/stellar/soroban-debugger.git
+git clone https://github.com/Timi16/soroban-debugger.git
 cd soroban-debugger
 ```
 
@@ -141,6 +141,15 @@ Create a `snapshot.json` file with the initial state for your debugger session. 
   - Default: `[]`
   - Example: `["arg1", "arg2"]`
 
+- **token** (string): Optional single-line authentication token for the remote debugger server.
+  - Tip: When using `request: "launch"`, this token is passed to the spawned server and used for subsequent authentication.
+
+- **tlsCert** (string): Optional path to a TLS certificate file for secure connections.
+  - Required if `tlsKey` is provided.
+
+- **tlsKey** (string): Optional path to a TLS private key file for secure connections.
+  - Required if `tlsCert` is provided.
+
 - **trace** (boolean): Enable detailed trace logging for debugging the adapter itself
   - Default: `false`
 
@@ -153,6 +162,11 @@ Create a `snapshot.json` file with the initial state for your debugger session. 
 
 - **connectTimeoutMs** (number): Timeout to wait for the backend server to accept connections on startup
   - Default: `10000`
+
+- **batchArgs** (string): Path to a JSON file containing an array of argument sets for batch execution. Each entry runs as a separate invocation. Results and a pass/fail summary are printed to the Debug Console.
+  - Example: `"${workspaceFolder}/tests/batch_inputs.json"`
+  - The JSON file should be an array of arrays, e.g. `[["arg1"], ["arg2", 42], []]`
+  - Known limits: batch mode skips breakpoints and stepping; use single-run mode to debug individual failing cases.
 
 ### Environment Overrides (Advanced)
 
@@ -237,12 +251,12 @@ The following features are **not available** in the extension.
 | Instruction-level stepping  | `--instruction-debug`, `--step-instructions`, `--step-mode [block]`                            | Use `soroban-debug interactive --instruction-debug` in a terminal      |
 | Storage key filtering       | `--storage-filter <pattern>`                                                                   | All storage is shown unfiltered in the Variables panel; filter via CLI |
 | Auth tree display           | `--show-auth`                                                                                  | Use `soroban-debug run --show-auth` in a terminal                      |
-| Batch execution             | `--batch-args <file>`, `--repeat N`                                                            | Use `soroban-debug run --batch-args` in a terminal                     |
+| Batch execution             | `--batch-args <file>`, `--repeat N`                                                            | Set `"batchArgs"` in `launch.json` (see below)                         |
 | TLS configuration           | `--tls-cert`, `--tls-key`                                                                      | Use CLI server/remote commands directly                                |
 | Storage export              | `--export-storage <file>`                                                                      | Use `soroban-debug run --export-storage` in a terminal                 |
 | Storage import              | `--import-storage <file>`                                                                      | Use `snapshotPath` in `launch.json` for initial state                  |
 | Event display and filtering | `--show-events`, `--event-filter`                                                              | Use `soroban-debug run --show-events` in a terminal                    |
-| Dry-run mode                | `--dry-run`                                                                                    | Use `soroban-debug run --dry-run` in a terminal                        |
+| Dry-run mode                | `--dry-run`                                                                                    | Use `dryRun: true` in `launch.json`                                    |
 | Cross-contract mocking      | `--mock CONTRACT.fn=value`                                                                     | Use `soroban-debug run --mock` in a terminal                           |
 | Conditional breakpoints     | (not in CLI either)                                                                            | Not supported on either surface                                        |
 | Hit-count conditions        | (not in CLI either)                                                                            | Not supported on either surface                                        |
@@ -494,8 +508,8 @@ This extension is part of the Soroban project and is licensed under the MIT Lice
 
 ## Support & Feedback
 
-- 📮 Report bugs via [GitHub Issues](https://github.com/stellar/soroban-debugger/issues)
-- 💡 Request features in [GitHub Discussions](https://github.com/stellar/soroban-debugger/discussions)
+- 📮 Report bugs via [GitHub Issues](https://github.com/Timi16/soroban-debugger/issues)
+- 💡 Request features in [GitHub Discussions](https://github.com/Timi16/soroban-debugger/discussions)
 - 📖 Read the [main README](../../README.md) for general Soroban documentation
 
 ## Related Resources

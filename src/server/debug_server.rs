@@ -442,6 +442,7 @@ impl DebugServer {
                     source_path,
                     lines,
                     exported_functions,
+                    max_forward_line_adjust,
                 } => match (self.engine.as_ref(), self.contract_wasm.as_deref()) {
                     (Some(engine), Some(wasm_bytes)) => {
                         if let Some(source_map) = engine.source_map() {
@@ -452,6 +453,7 @@ impl DebugServer {
                                 Path::new(&source_path),
                                 &lines,
                                 &exported,
+                                max_forward_line_adjust,
                             );
                             DebugResponse::SourceBreakpointsResolved { breakpoints }
                         } else {
@@ -475,28 +477,36 @@ impl DebugServer {
                     },
                 },
                 DebugRequest::Execute { function, args } => {
-                    if let Some(count) = self.repeat_count.filter(|&c| c > 1) {
-                        if let Some(wasm) = &self.contract_wasm {
-                            let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list()).unwrap_or_default();
-                            let initial_storage = self.engine.as_ref().and_then(|e| e.executor().get_storage_snapshot().ok()).and_then(|s| serde_json::to_string(&s).ok());
-                            let runner = crate::repeat::RepeatRunner::new(wasm.clone(), breakpoints, initial_storage);
-                            match runner.run(&function, args.as_deref(), count) {
-                                Ok(stats) => {
-                                    let output = format!(
-                                        "--- Repeat Execution ({} runs) ---\n\nDuration:\n  Min: {:.2}ms, Max: {:.2}ms, Avg: {:.2}ms\n\nCPU Instructions:\n  Min: {}, Max: {}, Avg: {}\n\nMemory (bytes):\n  Min: {}, Max: {}, Avg: {}\n\nResults: {}", 
-                                        count, 
-                                        stats.min_duration.as_secs_f64()*1000.0, stats.max_duration.as_secs_f64()*1000.0, stats.avg_duration.as_secs_f64()*1000.0,
-                                        stats.min_cpu, stats.max_cpu, stats.avg_cpu,
-                                        stats.min_memory, stats.max_memory, stats.avg_memory,
-                                        if stats.inconsistent_results { "INCONSISTENT" } else { "CONSISTENT" }
-                                    );
-                                    DebugResponse::ExecutionResult {
-                                        success: true,
-                                        output,
-                                        error: None,
-                                        paused: false,
-                                        completed: true,
-                                        source_location: None,
+                    if let Some(count) = self.repeat_count {
+                        if count > 1 {
+                            if let Some(wasm) = &self.contract_wasm {
+                                let breakpoints = self.engine.as_ref().map(|e| e.breakpoints().list()).unwrap_or_default();
+                                let initial_storage = self.engine.as_ref().and_then(|e| e.executor().get_storage_snapshot().ok()).and_then(|s| serde_json::to_string(&s).ok());
+                                let runner = crate::repeat::RepeatRunner::new(wasm.clone(), breakpoints, initial_storage);
+                                match runner.run(&function, args.as_deref(), count) {
+                                    Ok(stats) => {
+                                        let output = format!("--- Repeat Execution ({} runs) ---\n\nDuration:\n  Min: {:.2}ms, Max: {:.2}ms, Avg: {:.2}ms\n\nCPU Instructions:\n  Min: {}, Max: {}, Avg: {}\n\nMemory (bytes):\n  Min: {}, Max: {}, Avg: {}\n\nResults: {}", 
+                                            count, 
+                                            stats.min_duration.as_secs_f64()*1000.0, stats.max_duration.as_secs_f64()*1000.0, stats.avg_duration.as_secs_f64()*1000.0,
+                                            stats.min_cpu, stats.max_cpu, stats.avg_cpu,
+                                            stats.min_memory, stats.max_memory, stats.avg_memory,
+                                            if stats.inconsistent_results { "INCONSISTENT" } else { "CONSISTENT" }
+                                        );
+                                        let resp = DebugResponse::ExecutionResult {
+                                            success: true,
+                                            output,
+                                            error: None,
+                                            paused: false,
+                                            completed: true,
+                                            source_location: None,
+                                        };
+                                        send_msg(DebugMessage::response(message.id, resp))?;
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        let resp = DebugResponse::Error { message: e.to_string() };
+                                        send_msg(DebugMessage::response(message.id, resp))?;
+                                        continue;
                                     }
                                 }
                                 Err(e) => DebugResponse::Error { message: e.to_string() },
@@ -558,7 +568,17 @@ impl DebugServer {
                             },
                         }
                     }
-                },
+                    Some(engine) => {
+                        is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                        let r = execute_without_breakpoints(engine, &function, args);
+                        is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                        r
+                    }
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                }
+            },
                 DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
