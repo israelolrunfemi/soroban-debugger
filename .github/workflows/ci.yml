@@ -171,7 +171,11 @@ jobs:
           set -euo pipefail
           echo "Preparing baseline worktree at: $BENCH_BASE_WORKTREE"
           git worktree list --porcelain || true
-          git worktree add "$BENCH_BASE_WORKTREE" main
+          base_ref="origin/main"
+          if ! git rev-parse --verify --quiet refs/remotes/origin/main >/dev/null; then
+            base_ref="main"
+          fi
+          git worktree add --detach "$BENCH_BASE_WORKTREE" "$base_ref"
           git worktree list --porcelain || true
 
       - name: Run benchmarks (baseline on main)
@@ -276,7 +280,7 @@ jobs:
           set -euo pipefail
 
           # Use JSON output: structured and stable across cargo-llvm-cov versions
-          summary_json=$(cargo llvm-cov --workspace --json --summary-only 2>&1)
+          summary_json=$(cargo llvm-cov --workspace --json --summary-only)
           echo "$summary_json"
 
           # Parse and validate required schema fields through the shared script helper.
