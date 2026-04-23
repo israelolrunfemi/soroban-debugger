@@ -2,6 +2,8 @@
 //!
 //! Supports `NO_COLOR` (disable ANSI colors) and `--no-unicode` (ASCII-only output).
 
+use crate::inspector::budget::ResourceCheckpoint;
+
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -212,4 +214,26 @@ impl OutputWriter {
         }
         Ok(())
     }
+}
+
+pub fn format_resource_timeline(checkpoints: &[ResourceCheckpoint]) -> String {
+    let mut out = String::new();
+    out.push_str("Timeline Execution Sequence:\n");
+    for (i, cp) in checkpoints.iter().enumerate() {
+        if i == 0 {
+            out.push_str(&format!(
+                "  [+{}ms] Start: {} CPU, {} Mem\n",
+                cp.timestamp_ms, cp.cpu_instructions, cp.memory_bytes
+            ));
+        } else {
+            let prev = &checkpoints[i - 1];
+            let cpu_delta = cp.cpu_instructions.saturating_sub(prev.cpu_instructions);
+            let mem_delta = cp.memory_bytes.saturating_sub(prev.memory_bytes);
+            out.push_str(&format!(
+                "  [+{}ms] +{} CPU, +{} Mem at {}\n",
+                cp.timestamp_ms, cpu_delta, mem_delta, cp.location_name
+            ));
+        }
+    }
+    out
 }

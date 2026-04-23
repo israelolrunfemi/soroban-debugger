@@ -117,7 +117,273 @@ For precise control, use `{"type": "...", "value": ...}`:
 `u32`, `i32`, `u64`, `i64`, `u128`, `i128`, `bool`, `symbol`, `string`, `address`.
 
 ### Storage Filtering
-Filter large storage outputs by key pattern:
+
+Filter large storage outputs by key pattern using `--storage-filter`:
+
+```bash
+# Prefix match: keys starting with "balance:"
+soroban-debug run --contract token.wasm --function mint \
+  --storage-filter 'balance:*'
+
+# Regex match: keys matching a pattern
+soroban-debug run --contract token.wasm --function mint \
+  --storage-filter 're:^user_\d+$'
+
+# Exact match
+soroban-debug run --contract token.wasm --function mint \
+  --storage-filter 'total_supply'
+
+# Multiple filters (combined with OR)
+soroban-debug run --contract token.wasm --function mint \
+  --storage-filter 'balance:*' \
+  --storage-filter 'total_supply'
+```
+
+#### Exporting Execution Traces
+
+You can export a full record of the contract execution to a JSON file using the `--trace-output` flag. This trace captures function calls, arguments, return values, storage snapshots (before and after), events, and budget consumption.
+
+```bash
+soroban-debug run \
+  --contract contract.wasm \
+  --function hello \
+  --trace-output execution_trace.json
+```
+
+These traces can later be used with the `compare` command to identify regressions or differences between runs.
+
+##### Example Trace Output (JSON)
+
+An exported trace includes versioning, metadata, and full execution state:
+
+```json
+{
+  "version": "1.0",
+  "label": "Execution of hello",
+  "contract": "CA7QYNF5GE5XEC4HALXWFVQQ5TQWQ5LF7WMXMEQG7BWHBQV26YCWL5",
+  "function": "hello",
+  "args": "[\"world\"]",
+  "storage_before": {
+    "counter": "0"
+  },
+  "storage": {
+    "counter": "1"
+  },
+  "budget": {
+    "cpu_instructions": 1540,
+    "memory_bytes": 450,
+    "cpu_limit": 1000000,
+    "memory_limit": 1000000
+  },
+  "return_value": "void",
+  "call_sequence": [
+    {
+      "function": "hello",
+      "args": "[\"world\"]",
+      "depth": 0,
+      "budget": {
+        "cpu_instructions": 1540,
+        "memory_bytes": 450
+      }
+    }
+  ],
+  "events": [
+    {
+      "contract_id": "CA7Q...",
+      "topics": ["\"greeting\""],
+      "data": "\"Hello, world!\""
+    }
+  ]
+}
+```
+
+| Pattern          | Type   | Matches                                |
+|------------------|--------|----------------------------------------|
+| `balance:*`      | Prefix | Keys starting with `balance:`          |
+| `re:^user_\d+$`  | Regex  | Keys matching the regex                |
+| `total_supply`   | Exact  | Only the key `total_supply`            |
+| Pattern         | Type   | Matches                       |
+| --------------- | ------ | ----------------------------- |
+| `balance:*`     | Prefix | Keys starting with `balance:` |
+| `re:^user_\d+$` | Regex  | Keys matching the regex       |
+| `total_supply`  | Exact  | Only the key `total_supply`   |
+
+### Interactive Command
+
+Start an interactive debugging session:
+
+```bash
+soroban-debug interactive [OPTIONS]
+
+Options:
+  -c, --contract <FILE>     Path to the contract WASM file
+```
+
+### Inspect Command
+
+View contract information without executing:
+
+```bash
+soroban-debug inspect [OPTIONS]
+
+Options:
+  -c, --contract <FILE>     Path to the contract WASM file
+      --source-map-diagnostics
+                            Print resolved mappings, missing DWARF sections, and fallback behavior
+      --dependency-graph     Export cross-contract dependency graph (DOT + Mermaid)
+```
+
+Use `soroban-debug inspect --contract my_contract.wasm --source-map-diagnostics --format json`
+when you want a non-interactive DWARF triage report for CI or editor tooling.
+
+For full examples, see [docs/dependency-graph.md](https://github.com/Timi16/soroban-debugger/blob/main/docs/dependency-graph.md).
+
+### Upgrade Check Command
+
+Compare two contract binaries for API breakage and execution differences before releasing:
+
+```bash
+soroban-debug upgrade-check --old current.wasm --new upgraded.wasm
+```
+
+The debugger runs parallel traces and classifies the upgrade:
+- **Safe:** No breaking changes, stable inputs execution.
+- **Caution:** Non-breaking changes like new map arguments or endpoints.
+- **Breaking:** Removed functions, changed signatures, or execution panic regressions.
+
+### Completions Command
+
+Generate shell completion scripts for your favorite shell:
+
+```bash
+soroban-debug completions bash > /usr/local/etc/bash_completion.d/soroban-debug
+```
+
+Supported shells: `bash`, `zsh`, `fish`, `powershell`.
+
+#### Installation Instructions
+
+**Bash:**
+
+```bash
+soroban-debug completions bash > /usr/local/etc/bash_completion.d/soroban-debug
+```
+
+**Zsh:**
+
+```bash
+soroban-debug completions zsh > /usr/local/share/zsh/site-functions/_soroban-debug
+```
+
+**Fish:**
+
+```bash
+soroban-debug completions fish > ~/.config/fish/completions/soroban-debug.fish
+```
+
+**PowerShell:**
+
+```powershell
+soroban-debug completions powershell >> $PROFILE
+```
+
+### Compare Command
+
+Compare two execution trace JSON files side-by-side to identify
+differences and regressions in storage, budget, return values, and
+execution flow:
+
+```bash
+soroban-debug compare <TRACE_A> <TRACE_B> [OPTIONS]
+
+Options:
+  -o, --output <FILE>       Output file for the comparison report (default: stdout)
+```
+
+Example:
+
+```bash
+# Compare two saved execution traces
+soroban-debug compare examples/trace_a.json examples/trace_b.json
+
+# Save report to a file
+soroban-debug compare baseline.json new.json --output diff_report.txt
+```
+
+See [`doc/compare.md`](https://github.com/Timi16/soroban-debugger/blob/main/docs/doc/compare.md) for the full trace JSON format reference
+and a regression testing workflow guide.
+
+## Examples
+
+### Example 1: Debug a Token Transfer
+
+```bash
+soroban-debug run \
+  --contract token.wasm \
+  --function transfer \
+  --args '["user1", "user2", 100]'
+```
+
+### Example 1a: Debug with Map Arguments
+
+Pass JSON objects as Map arguments:
+
+```bash
+# Flat map argument
+soroban-debug run \
+  --contract token.wasm \
+  --function update_user \
+  --args '{"user":"ABC","balance":1000}'
+
+# Nested map argument
+soroban-debug run \
+  --contract token.wasm \
+  --function update_user \
+  --args '{"user":"ABC","balance":1000,"metadata":{"verified":true,"level":"premium"}}'
+
+# Mixed-type values in map
+soroban-debug run \
+  --contract dao.wasm \
+  --function create_proposal \
+  --args '{"title":"Proposal 1","votes":42,"active":true,"tags":["important","urgent"]}'
+```
+
+Output:
+
+```
+> Debugger started
+> Paused at: transfer
+> Args: from=user1, to=user2, amount=100
+
+(debug) s
+> Executing: get_balance(user1)
+> Storage: balances[user1] = 500
+
+(debug) s
+> Executing: set_balance(user1, 400)
+
+(debug) storage
+Storage:
+  balances[user1] = 400
+  balances[user2] = 100
+
+(debug) c
+> Execution completed
+> Result: Ok(())
+```
+
+### Example 2: Set Breakpoints
+
+```bash
+soroban-debug run \
+  --contract dao.wasm \
+  --function execute \
+  --breakpoint verify_signature \
+  --breakpoint update_state
+```
+
+### Example 3: Initial Storage State
+
 ```bash
 soroban-debug run --contract token.wasm --function mint --storage-filter 'balance:*'
 ```

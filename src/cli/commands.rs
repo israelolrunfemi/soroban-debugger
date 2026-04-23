@@ -76,6 +76,7 @@ struct AnalyzeCommandOutput {
     findings: Vec<crate::analyzer::security::SecurityFinding>,
     dynamic_analysis: Option<DynamicAnalysisMetadata>,
     warnings: Vec<String>,
+    suppressed_count: usize,
 }
 
 #[derive(serde::Serialize)]
@@ -232,10 +233,20 @@ fn render_security_report(output: &AnalyzeCommandOutput) -> String {
 
     if output.findings.is_empty() {
         lines.push("No security findings detected.".to_string());
+        if output.suppressed_count > 0 {
+            lines.push(format!(
+                "({} findings were suppressed)",
+                output.suppressed_count
+            ));
+        }
         return lines.join("\n");
     }
 
-    lines.push(format!("Findings: {}", output.findings.len()));
+    lines.push(format!(
+        "Findings: {} ({} suppressed)",
+        output.findings.len(),
+        output.suppressed_count
+    ));
     for (idx, finding) in output.findings.iter().enumerate() {
         lines.push(format!(
             "  {}. [{:?}] {} at {}",
@@ -1292,7 +1303,10 @@ fn format_text_report(report: &CompatibilityReport) -> String {
     } else {
         "INCOMPATIBLE"
     };
-    out.push_str(&format!("Status: {}\n", status));
+    out.push_str(&format!(
+        "Status: {} (Classification: {})\n",
+        status, report.classification
+    ));
 
     out.push('\n');
     out.push_str(&format!(
@@ -2315,22 +2329,31 @@ pub fn analyze(args: AnalyzeArgs, _verbosity: Verbosity) -> Result<()> {
         }
     }
 
-    let analyzer = SecurityAnalyzer::new();
+    let mut analyzer = SecurityAnalyzer::new();
+    let config = crate::config::Config::load_or_default();
+    if let Some(supp_path) = config.output.suppressions_file {
+        if std::path::Path::new(&supp_path).exists() {
+            analyzer = analyzer.load_suppressions_from_file(&supp_path)?;
+        }
+    }
     let filter = crate::analyzer::security::AnalyzerFilter {
         enable_rules: args.enable_rule.clone(),
         disable_rules: args.disable_rule.clone(),
         min_severity: parse_min_severity(&args.min_severity)?,
     };
+    let contract_path = args.contract.to_string_lossy().to_string();
     let report = analyzer.analyze(
         &wasm_file.bytes,
         executor.as_ref(),
         trace_entries.as_deref(),
         &filter,
+        &contract_path,
     )?;
     let output = AnalyzeCommandOutput {
         findings: report.findings,
         dynamic_analysis,
         warnings,
+        suppressed_count: report.metadata.suppressed_count,
     };
 
     match args.format.to_lowercase().as_str() {
