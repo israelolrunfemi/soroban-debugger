@@ -512,6 +512,19 @@ when you want a non-interactive DWARF triage report for CI or editor tooling.
 
 For full examples, see [docs/dependency-graph.md](https://github.com/Timi16/soroban-debugger/blob/main/docs/dependency-graph.md).
 
+### Upgrade Check Command
+
+Compare two contract binaries for API breakage and execution differences before releasing:
+
+```bash
+soroban-debug upgrade-check --old current.wasm --new upgraded.wasm
+```
+
+The debugger runs parallel traces and classifies the upgrade:
+- **Safe:** No breaking changes, stable inputs execution.
+- **Caution:** Non-breaking changes like new map arguments or endpoints.
+- **Breaking:** Removed functions, changed signatures, or execution panic regressions.
+
 ### Completions Command
 
 Generate shell completion scripts for your favorite shell:
