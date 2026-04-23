@@ -222,6 +222,7 @@ type DebugRequest =
   | { type: 'Disconnect' }
   | { type: 'LoadSnapshot'; snapshot_path: string }
   | { type: 'GetCapabilities' }
+  | { type: 'GetEvents' }
   | { type: 'Unknown' };
 
 type DebugResponse =
@@ -309,6 +310,7 @@ type DebugResponse =
       };
     }
   | { type: "Pong" }
+  | { type: "EventsList"; events: any[] }
   | { type: "Disconnected" }
   | { type: "Unknown" }
   | { type: "Error"; message: string };
@@ -666,6 +668,12 @@ export class DebuggerProcess {
       return parsed as Record<string, unknown>;
     }
     return {};
+  }
+
+  async getEvents(options?: RequestOptions): Promise<any[]> {
+    const response = await this.sendRequest({ type: "GetEvents" }, options);
+    this.expectResponse(response, "EventsList");
+    return response.events || [];
   }
 
   async ping(): Promise<void> {

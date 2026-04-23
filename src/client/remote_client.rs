@@ -50,7 +50,7 @@ impl Default for RetryPolicy {
 
 #[derive(Debug, Clone)]
 pub struct RemoteClientConfig {
-    pub connect_timeout: Duration,  // defaults to 10 seconds.
+    pub connect_timeout: Duration, // defaults to 10 seconds.
     pub timeouts: RequestTimeouts,
     pub retry: RetryPolicy,
     pub heartbeat_interval_ms: Option<u32>,
@@ -186,24 +186,17 @@ impl RemoteClient {
     }
 
     fn create_stream(addr: &str, config: &RemoteClientConfig) -> Result<RemoteStream> {
-
         use std::net::ToSocketAddrs;
         let socket_addr = addr
             .to_socket_addrs()
             .map_err(|e| {
-                DebuggerError::NetworkError(format!(
-                    "Failed to resolve address '{}': {}",
-                    addr, e
-                ))
+                DebuggerError::NetworkError(format!("Failed to resolve address '{}': {}", addr, e))
             })?
             .next()
             .ok_or_else(|| {
-                DebuggerError::NetworkError(format!(
-                    "No socket address resolved for '{}'",
-                    addr
-                ))
+                DebuggerError::NetworkError(format!("No socket address resolved for '{}'", addr))
             })?;
- 
+
         // ── TCP connect with configurable timeout ────────────────────────────
         let tcp_stream =
             TcpStream::connect_timeout(&socket_addr, config.connect_timeout).map_err(|e| {
@@ -232,7 +225,7 @@ impl RemoteClient {
                     addr, kind_hint
                 ))
             })?;
- 
+
         if config.tls_cert.is_some() || config.tls_key.is_some() || config.tls_ca.is_some() {
             let mut root_store = RootCertStore::empty();
             if let Some(ref ca_path) = config.tls_ca {
@@ -263,7 +256,7 @@ impl RemoteClient {
                     })?;
                 }
             }
- 
+
             let client_config = if let (Some(ref cert_path), Some(ref key_path)) =
                 (&config.tls_cert, &config.tls_key)
             {
@@ -281,7 +274,7 @@ impl RemoteClient {
                     .into_iter()
                     .map(Certificate)
                     .collect();
- 
+
                 let key_file = std::fs::File::open(key_path).map_err(|e| {
                     DebuggerError::FileError(format!(
                         "Failed to open client key {:?}: {}",
@@ -292,7 +285,7 @@ impl RemoteClient {
                 let keys = rustls_pemfile::pkcs8_private_keys(&mut key_reader).map_err(|e| {
                     DebuggerError::FileError(format!("Failed to parse client key: {}", e))
                 })?;
- 
+
                 if let Some(key) = keys.into_iter().next() {
                     ClientConfig::builder()
                         .with_safe_defaults()
@@ -316,17 +309,17 @@ impl RemoteClient {
                     .with_root_certificates(root_store)
                     .with_no_client_auth()
             };
- 
+
             let host = addr.split(':').next().unwrap_or("localhost");
             let server_name = ServerName::try_from(host).map_err(|e| {
                 DebuggerError::NetworkError(format!("Invalid server name '{}': {}", host, e))
             })?;
- 
+
             let conn = rustls::client::ClientConnection::new(Arc::new(client_config), server_name)
                 .map_err(|e| {
                     DebuggerError::NetworkError(format!("Failed to create TLS connection: {}", e))
                 })?;
- 
+
             Ok(RemoteStream::Tls(Box::new(rustls::StreamOwned::new(
                 conn, tcp_stream,
             ))))
@@ -364,6 +357,9 @@ impl RemoteClient {
                     "Connected to remote session {} (created {}, label={:?})",
                     session_id, session_created_at, session_label
                 );
+                selected_version, ..
+            } => {
+                self.selected_protocol_version = Some(selected_version);
                 Ok(selected_version)
             }
             DebugResponse::IncompatibleProtocol { message, .. } => {
@@ -1063,7 +1059,6 @@ impl Drop for RemoteClient {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1080,16 +1075,16 @@ mod tests {
         assert!(err.to_string().contains("Network/transport error"));
     }
 
-     #[test]
+    #[test]
     fn connect_timeout_is_respected() {
         if TcpListener::bind("127.0.0.1:0").is_err() {
             eprintln!("Skipping connect_timeout_is_respected: loopback restricted");
             return;
         }
- 
+
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
- 
+
         // accept but never send a byte  simulates a silent firewall / slow
         // proxy that completes TCP but stalls the application protocol.
         std::thread::spawn(move || {
@@ -1098,7 +1093,7 @@ mod tests {
                 std::thread::sleep(Duration::from_secs(5));
             }
         });
- 
+
         let config = RemoteClientConfig {
             // 1 ms connect timeout — fast on loopback since the OS TCP handshake
             // completes immediately; the actual timeout fires during the protocol
@@ -1117,7 +1112,7 @@ mod tests {
             },
             ..Default::default()
         };
- 
+
         let err = RemoteClient::connect_with_config(&addr.to_string(), None, config).unwrap_err();
         let msg = err.to_string();
 
@@ -1148,7 +1143,7 @@ mod tests {
             },
         )
         .unwrap_err();
- 
+
         let msg = err.to_string();
         assert!(
             msg.contains("Network/transport error")
@@ -1159,7 +1154,6 @@ mod tests {
             msg
         );
     }
- 
 
     /// Respond to a handshake then stall on the next request (for timeout tests).
     fn accept_handshake_then_stall(stream: &mut std::net::TcpStream) {

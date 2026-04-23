@@ -304,6 +304,25 @@ pub fn format_resource_timeline(timeline: &[ResourceCheckpoint]) -> String {
     }
 
     OutputConfig::to_ascii(&out)
+pub fn format_resource_timeline(timeline: &[crate::inspector::budget::ResourceCheckpoint]) -> String {
+    let mut out = String::new();
+    use std::fmt::Write;
+    
+    writeln!(out, "| Timestamp (ms) | CPU Instructions | Memory Bytes | Location |").unwrap();
+    writeln!(out, "|----------------|------------------|--------------|----------|").unwrap();
+    
+    for checkpoint in timeline {
+        writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            checkpoint.timestamp_ms,
+            checkpoint.cpu_instructions,
+            checkpoint.memory_bytes,
+            checkpoint.location_name
+        ).unwrap();
+    }
+    
+    out
 }
 
 /// Status kind for text-equivalent labels (screen reader friendly).
@@ -374,6 +393,30 @@ impl OutputWriter {
         }
         Ok(())
     }
+}
+
+/// Formats a resource timeline as a markdown table.
+pub fn format_resource_timeline(
+    timeline: &[crate::inspector::budget::ResourceCheckpoint],
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "| Time (ms) | CPU Instructions | Memory Bytes | Location |"
+    );
+    let _ = writeln!(
+        out,
+        "|-----------|------------------|--------------|----------|"
+    );
+    for point in timeline {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            point.timestamp_ms, point.cpu_instructions, point.memory_bytes, point.location_name
+        );
+    }
+    out
 }
 
 #[cfg(test)]

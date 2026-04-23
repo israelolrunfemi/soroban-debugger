@@ -260,6 +260,9 @@ pub enum DebugRequest {
     /// Disconnect
     Disconnect,
 
+    /// Get diagnostic and contract events
+    GetEvents,
+
     /// Cancel a running execution
     Cancel,
 
@@ -409,6 +412,11 @@ pub enum DebugResponse {
 
     /// Cancel acknowledged
     CancelAck,
+
+    /// List of events
+    EventsList {
+        events: Vec<crate::server::protocol::DynamicTraceEvent>,
+    },
 
     /// Catch-all for forward compatibility
     #[serde(other)]

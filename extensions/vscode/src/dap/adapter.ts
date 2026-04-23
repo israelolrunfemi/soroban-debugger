@@ -20,6 +20,7 @@ import { VariableStore } from './variableStore';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
 import { LogManager, LogLevel as ManagerLogLevel, LogPhase } from '../debug/logManager';
+import { EventsTreeDataProvider } from '../eventsTree';
 
 
 
@@ -86,6 +87,7 @@ export class SorobanDebugSession extends DebugSession {
   private static readonly FIRST_CONTINUE_STOP_REASON: 'breakpoint' = 'breakpoint';
   private logManager: LogManager | undefined;
   private debuggerProcess: DebuggerProcess | null = null;
+  private eventsTreeDataProvider: EventsTreeDataProvider | undefined;
   private state: DebuggerState = {
     isRunning: false,
     isPaused: false,
@@ -115,7 +117,8 @@ export class SorobanDebugSession extends DebugSession {
 
   constructor(
     logManagerOrLinesStartAt1?: LogManager | boolean,
-    launchLifecycleReporterOrIsServer?: ((event: LaunchLifecycleEvent) => void) | boolean
+    launchLifecycleReporterOrIsServer?: ((event: LaunchLifecycleEvent) => void) | boolean,
+    eventsTreeDataProvider?: EventsTreeDataProvider
   ) {
     super(
       typeof logManagerOrLinesStartAt1 === 'boolean' ? logManagerOrLinesStartAt1 : true,
@@ -125,6 +128,7 @@ export class SorobanDebugSession extends DebugSession {
     this.launchLifecycleReporter = typeof launchLifecycleReporterOrIsServer === 'boolean'
       ? undefined
       : launchLifecycleReporterOrIsServer;
+    this.eventsTreeDataProvider = eventsTreeDataProvider;
   }
 
   protected initializeRequest(
@@ -451,6 +455,17 @@ export class SorobanDebugSession extends DebugSession {
       expensive: false
     });
 
+    const localsKeys = this.state.locals ? Object.keys(this.state.locals) : [];
+    if (localsKeys.length > 0) {
+      const localsRef = this.variableStore.createListHandle(this.variableStore.variablesFromLocals(this.state.locals as Record<string, unknown>));
+
+      scopes.push({
+        name: 'Locals',
+        variablesReference: localsRef,
+        expensive: false
+      });
+    }
+
     const storageKeys = this.state.storage ? Object.keys(this.state.storage) : [];
     if (storageKeys.length > 0) {
       const variablesRef = this.variableStore.createListHandle(this.variableStore.variablesFromStorage(this.state.storage as Record<string, unknown>));
@@ -646,6 +661,8 @@ export class SorobanDebugSession extends DebugSession {
         this.state.isPaused = true;
         const stopReason = this.mapPauseReason(result.pauseReason) ?? 'breakpoint';
         this.sendEvent(new StoppedEvent(stopReason, this.threadId));
+        await this.updateEvents();
+        this.sendEvent(new StoppedEvent('breakpoint', this.threadId));
         return;
       }
 
@@ -794,6 +811,8 @@ export class SorobanDebugSession extends DebugSession {
       this.state.isPaused = true;
       const stopReason = this.mapPauseReason(result.pauseReason) ?? reason;
       this.sendEvent(new StoppedEvent(stopReason, this.threadId));
+      await this.updateEvents();
+      this.sendEvent(new StoppedEvent(reason, this.threadId));
       return;
     }
 
@@ -1136,6 +1155,17 @@ export class SorobanDebugSession extends DebugSession {
     }
 
     return notices.length > 0 ? notices.join(' ') : undefined;
+  }
+
+  private async updateEvents(): Promise<void> {
+    if (this.debuggerProcess && this.eventsTreeDataProvider) {
+      try {
+        const events = await this.debuggerProcess.getEvents();
+        this.eventsTreeDataProvider.refresh(events);
+      } catch (e) {
+        this.logManager?.log(ManagerLogLevel.Error, LogPhase.DAP, `Failed to update events: ${e}`);
+      }
+    }
   }
 }
 
