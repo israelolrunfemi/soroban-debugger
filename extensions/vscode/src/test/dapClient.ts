@@ -26,12 +26,30 @@ type DapEvent = {
 
 type DapMessage = DapResponse | DapEvent;
 
+type TranscriptEntry = {
+  timestampMs: number;
+  direction: 'send' | 'recv';
+  kind: 'request' | 'response' | 'event';
+  commandOrEvent: string;
+  success?: boolean;
+  message?: string;
+};
+
+export type TimestampedEvent = {
+  timestampMs: number;
+  event: string;
+  body?: any;
+};
+
 export class DapClient {
   private proc: ChildProcessWithoutNullStreams;
   private seq = 0;
   private stdoutBuffer: Buffer = Buffer.alloc(0);
   private pending = new Map<number, { resolve: (r: DapResponse) => void; reject: (e: Error) => void }>();
   private events: DapEvent[] = [];
+  private eventLog: TimestampedEvent[] = [];
+  private transcript: TranscriptEntry[] = [];
+  private readonly maxTranscriptEntries = 200;
 
   constructor(proc: ChildProcessWithoutNullStreams) {
     this.proc = proc;
@@ -60,7 +78,11 @@ export class DapClient {
     const responsePromise = new Promise<DapResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestSeq);
-        reject(new Error(`Timed out waiting for DAP response to ${command}`));
+        reject(
+          new Error(
+            `Timed out waiting for DAP response to ${command}\n\nRecent DAP transcript:\n${this.formatRecentTranscript()}`,
+          ),
+        );
       }, timeoutMs);
 
       this.pending.set(requestSeq, {
@@ -76,6 +98,12 @@ export class DapClient {
     });
 
     this.proc.stdin.write(Buffer.concat([header, payload]));
+    this.recordTranscript({
+      timestampMs: Date.now(),
+      direction: 'send',
+      kind: 'request',
+      commandOrEvent: command,
+    });
     const response = await responsePromise;
     return response;
   }
@@ -95,7 +123,9 @@ export class DapClient {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
-    throw new Error(`Timed out waiting for DAP event: ${event}`);
+    throw new Error(
+      `Timed out waiting for DAP event: ${event}\n\nRecent DAP transcript:\n${this.formatRecentTranscript()}`,
+    );
   }
 
   async waitForAnyEvent(
@@ -113,7 +143,36 @@ export class DapClient {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
 
-    throw new Error(`Timed out waiting for DAP event(s): ${events.join(', ')}`);
+    throw new Error(
+      `Timed out waiting for DAP event(s): ${events.join(', ')}\n\nRecent DAP transcript:\n${this.formatRecentTranscript()}`,
+    );
+  }
+
+  /** Returns a copy of all events received, with millisecond timestamps. */
+  getEventLog(): TimestampedEvent[] {
+    return this.eventLog.slice();
+  }
+
+  formatRecentTranscript(limit = 30): string {
+    const recent = this.transcript.slice(Math.max(0, this.transcript.length - limit));
+    if (recent.length === 0) {
+      return '(no DAP messages captured)';
+    }
+
+    return recent
+      .map((entry) => {
+        const time = new Date(entry.timestampMs).toISOString();
+        const base = `[${time}] ${entry.direction.toUpperCase()} ${entry.kind.toUpperCase()} ${entry.commandOrEvent}`;
+        const parts: string[] = [];
+        if (typeof entry.success === 'boolean') {
+          parts.push(`success=${entry.success}`);
+        }
+        if (entry.message) {
+          parts.push(`message=${entry.message}`);
+        }
+        return parts.length > 0 ? `${base} (${parts.join(', ')})` : base;
+      })
+      .join('\n');
   }
 
   dispose(): void {
@@ -159,8 +218,24 @@ export class DapClient {
   private handleMessage(message: DapMessage): void {
     if (message.type === 'event') {
       this.events.push(message);
+      this.eventLog.push({ timestampMs: Date.now(), event: message.event, body: message.body });
+      this.recordTranscript({
+        timestampMs: Date.now(),
+        direction: 'recv',
+        kind: 'event',
+        commandOrEvent: message.event,
+      });
       return;
     }
+
+    this.recordTranscript({
+      timestampMs: Date.now(),
+      direction: 'recv',
+      kind: 'response',
+      commandOrEvent: message.command,
+      success: message.success,
+      message: message.message,
+    });
 
     const pending = this.pending.get(message.request_seq);
     if (!pending) {
@@ -169,5 +244,12 @@ export class DapClient {
 
     this.pending.delete(message.request_seq);
     pending.resolve(message);
+  }
+
+  private recordTranscript(entry: TranscriptEntry): void {
+    this.transcript.push(entry);
+    if (this.transcript.length > this.maxTranscriptEntries) {
+      this.transcript.splice(0, this.transcript.length - this.maxTranscriptEntries);
+    }
   }
 }

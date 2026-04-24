@@ -14,6 +14,10 @@ Use this for:
 - **Security/Analyzer Owner:** owns `analyze` sanity and any security-facing changes
 - **Performance Owner:** owns benchmark sanity gates
 
+## PR Quality Gates
+
+- [ ] All merged PRs in this release window documented CI/test behavior changes or explicitly marked N/A
+
 ## Required Gates (no waivers by default)
 
 ### Rust (workspace)
@@ -24,6 +28,12 @@ Use this for:
   - Pass criteria: exit code 0 (no warnings)
 - Tests: `cargo test --workspace --all-features`
   - Pass criteria: exit code 0
+- Man pages: `make check-man` (or `TMPDIR=/tmp make check-man` in restricted environments)
+  - Pass criteria: exit code 0 (no drift between committed and generated man pages)
+  - Notes:
+    - Man pages are regenerated via `cargo build` during the check
+    - If drift is detected, run `make regen-man` and commit the updated `.1` files
+    - TMPDIR can be set to override temp directory location (useful in CI or sandbox environments)
 
 ### Security analyzer sanity
 
@@ -66,7 +76,9 @@ Benchmarks must not regress beyond the configured thresholds:
   - `Cargo.toml` version equals `X.Y.Z`
   - `extensions/vscode/package.json` version equals `X.Y.Z` (if publishing the extension as part of the release)
 - Changelog:
-  - `CHANGELOG.md` updated for `X.Y.Z`
+  - `CHANGELOG.md` updated for `X.Y.Z` using the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
+  - (Optional) Use `git-cliff` to generate the log:  
+    `git cliff --unreleased --tag vX.Y.Z --prepend CHANGELOG.md`
 
 ## Waiver process (when absolutely necessary)
 

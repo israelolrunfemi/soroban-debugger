@@ -43,6 +43,10 @@ pub struct RuleMetadata {
     pub name: String,
     pub description: String,
     pub severity: Severity,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rationale: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -59,14 +63,16 @@ pub struct ReportMetadata {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SecurityWaiver {
-    pub fingerprint: String,
+pub struct AnalyzerSuppression {
+    pub rule_id: String,
+    pub contract_path: String,
+    pub location: Option<String>,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct WaiverFile {
-    pub waivers: Vec<SecurityWaiver>,
+pub struct AnalyzerSuppressionsFile {
+    pub suppressions: Vec<AnalyzerSuppression>,
 }
 
 pub trait SecurityRule {
@@ -74,6 +80,12 @@ pub trait SecurityRule {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn severity(&self) -> Severity;
+    fn rationale(&self) -> Option<&str> {
+        None
+    }
+    fn remediation(&self) -> Option<&str> {
+        None
+    }
 
     fn metadata(&self) -> RuleMetadata {
         RuleMetadata {
@@ -81,6 +93,8 @@ pub trait SecurityRule {
             name: self.name().to_string(),
             description: self.description().to_string(),
             severity: self.severity(),
+            rationale: self.rationale().map(|s| s.to_string()),
+            remediation: self.remediation().map(|s| s.to_string()),
         }
     }
 
@@ -98,7 +112,7 @@ pub trait SecurityRule {
 
 pub struct SecurityAnalyzer {
     rules: Vec<Box<dyn SecurityRule>>,
-    waivers: Vec<SecurityWaiver>,
+    suppressions: Vec<AnalyzerSuppression>,
 }
 
 impl SecurityAnalyzer {
@@ -113,23 +127,26 @@ impl SecurityAnalyzer {
                 Box::new(UnboundedIterationRule),
                 Box::new(StorageWritePressureRule),
             ],
-            waivers: Vec::new(),
+            suppressions: Vec::new(),
         }
     }
 
-    pub fn with_waivers(mut self, waivers: Vec<SecurityWaiver>) -> Self {
-        self.waivers = waivers;
+    pub fn with_suppressions(mut self, suppressions: Vec<AnalyzerSuppression>) -> Self {
+        self.suppressions = suppressions;
         self
     }
 
-    pub fn load_waivers_from_file<P: AsRef<std::path::Path>>(mut self, path: P) -> Result<Self> {
+    pub fn load_suppressions_from_file<P: AsRef<std::path::Path>>(
+        mut self,
+        path: P,
+    ) -> Result<Self> {
         let content = std::fs::read_to_string(path).map_err(|e| {
-            crate::DebuggerError::FileError(format!("Failed to read waiver file: {}", e))
+            crate::DebuggerError::FileError(format!("Failed to read suppression file: {}", e))
         })?;
-        let waiver_file: WaiverFile = toml::from_str(&content).map_err(|e| {
-            crate::DebuggerError::FileError(format!("Failed to parse waiver TOML: {}", e))
+        let supp_file: AnalyzerSuppressionsFile = toml::from_str(&content).map_err(|e| {
+            crate::DebuggerError::FileError(format!("Failed to parse suppression TOML: {}", e))
         })?;
-        self.waivers = waiver_file.waivers;
+        self.suppressions = supp_file.suppressions;
         Ok(self)
     }
 
@@ -139,6 +156,7 @@ impl SecurityAnalyzer {
         executor: Option<&ContractExecutor>,
         trace: Option<&[DynamicTraceEvent]>,
         filter: &AnalyzerFilter,
+        contract_path: &str,
     ) -> Result<SecurityReport> {
         let mut report = SecurityReport::default();
 
@@ -177,22 +195,26 @@ impl SecurityAnalyzer {
             }
         }
 
-        self.apply_waivers(&mut report);
+        self.apply_suppressions(&mut report, contract_path);
         Ok(report)
     }
 
-    fn apply_waivers(&self, report: &mut SecurityReport) {
-        let waiver_set: HashSet<&str> = self
-            .waivers
-            .iter()
-            .map(|w| w.fingerprint.as_str())
-            .collect();
+    fn apply_suppressions(&self, report: &mut SecurityReport, contract_path: &str) {
         let mut suppressed_count = 0;
 
         for finding in &mut report.findings {
-            if waiver_set.contains(finding.fingerprint.as_str()) {
-                finding.suppressed = true;
-                suppressed_count += 1;
+            for supp in &self.suppressions {
+                if supp.rule_id == finding.rule_id
+                    && contract_path.contains(&supp.contract_path)
+                    && supp
+                        .location
+                        .as_ref()
+                        .is_none_or(|loc| finding.location.contains(loc))
+                {
+                    finding.suppressed = true;
+                    suppressed_count += 1;
+                    break;
+                }
             }
         }
 
@@ -215,7 +237,7 @@ impl Default for SecurityAnalyzer {
 
 /// CRC-16/XModem (poly = 0x1021, init = 0x0000, no reflection).
 /// Used by Stellar StrKey to protect against transcription errors.
-fn strkey_crc16(data: &[u8]) -> u16 {
+pub(crate) fn strkey_crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0x0000;
     for &byte in data {
         crc ^= (byte as u16) << 8;
@@ -244,7 +266,7 @@ fn strkey_crc16(data: &[u8]) -> u16 {
 /// Any 56-char string that fails even one of these steps is **not** a valid
 /// address — it is, for example, an error-message fragment, a base64 blob, or
 /// a random identifier that merely happens to start with 'G' or 'C'.
-fn is_valid_strkey(s: &str) -> bool {
+pub(crate) fn is_valid_strkey(s: &str) -> bool {
     if s.len() != 56 {
         return false;
     }
@@ -312,6 +334,14 @@ impl SecurityRule for HardcodedAddressRule {
 
     fn severity(&self) -> Severity {
         Severity::Medium
+    }
+
+    fn rationale(&self) -> Option<&str> {
+        Some("Hardcoded addresses restrict contract portability, create lock-in, and complicate test environments where the address differs.")
+    }
+
+    fn remediation(&self) -> Option<&str> {
+        Some("Pass addresses via initialization/constructor parameters and persist them in standard contract storage.")
     }
 
     fn analyze_static(&self, wasm_bytes: &[u8]) -> Result<Vec<SecurityFinding>> {
@@ -526,31 +556,39 @@ impl SecurityRule for AuthorizationCheckRule {
         Severity::High
     }
 
+    fn rationale(&self) -> Option<&str> {
+        Some("Missing require_auth calls allow unauthorized users to invoke sensitive endpoints and perform actions on behalf of others.")
+    }
+
+    fn remediation(&self) -> Option<&str> {
+        Some("Identify all caller arguments and invoke `address.require_auth()` before persisting state changes.")
+    }
+
     fn analyze_dynamic(
         &self,
         _executor: Option<&ContractExecutor>,
         trace: &[DynamicTraceEvent],
     ) -> Result<Vec<SecurityFinding>> {
         let mut findings = Vec::new();
-        let mut auth_actors_per_frame: std::collections::HashMap<
-            FrameKey,
-            std::collections::HashMap<String, usize>,
-        > = std::collections::HashMap::new();
+        let mut auth_actors_per_frame: HashMap<FrameKey, HashMap<String, usize>> = HashMap::new();
+        let mut auth_actors_per_function: HashMap<String, HashMap<String, usize>> = HashMap::new();
 
         // First pass: find authorized actors per frame
         for entry in trace {
             if entry.kind == DynamicTraceEventKind::Authorization {
+                let actor = effective_actor(entry);
+                let function_name = function_scope(entry.function.as_deref());
+                if let Some(actor) = actor.as_ref() {
+                    auth_actors_per_function
+                        .entry(function_name)
+                        .or_default()
+                        .entry(actor.clone())
+                        .or_insert(entry.sequence);
+                }
+
                 if let Some(frame) = frame_key_for(entry) {
                     let actors = auth_actors_per_frame.entry(frame).or_default();
-                    let addr = entry.address.clone().or_else(|| {
-                        // Legacy fallback
-                        entry
-                            .message
-                            .split_whitespace()
-                            .find(|w| (w.starts_with('G') || w.starts_with('C')) && w.len() == 56)
-                            .map(|s| s.to_string())
-                    });
-                    if let Some(addr) = addr {
+                    if let Some(addr) = actor {
                         actors.entry(addr).or_insert(entry.sequence);
                     }
                 }
@@ -561,31 +599,50 @@ impl SecurityRule for AuthorizationCheckRule {
         // Second pass: check storage writes
         for entry in trace {
             if entry.kind == DynamicTraceEventKind::StorageWrite {
+                let function_name = function_scope(entry.function.as_deref());
                 if let Some(frame) = frame_key_for(entry) {
-                    if let Some(authorized_actors) = auth_actors_per_frame.get(&frame) {
+                    let frame_actors = auth_actors_per_frame.get(&frame);
+                    let function_actors = auth_actors_per_function.get(&function_name);
+                    let authorized_actors = frame_actors.or(function_actors);
+
+                    if let Some(authorized_actors) = authorized_actors {
                         let earliest_auth = authorized_actors
                             .values()
                             .min()
                             .cloned()
                             .unwrap_or(usize::MAX);
                         if entry.sequence < earliest_auth {
-                            problematic_writes.push((entry.clone(), format!("Storage mutation detected before any authorization in frame '{}'.", frame.function.as_deref().unwrap_or("unknown"))));
+                            problematic_writes.push((entry.clone(), format!("Storage mutation detected before any authorization in function '{}' frame '{}'.", function_name, frame.function.as_deref().unwrap_or("unknown"))));
                         } else if let Some(key) = &entry.storage_key {
                             let covered = authorized_actors.keys().any(|addr| key.contains(addr));
                             if !covered && !authorized_actors.is_empty() {
                                 problematic_writes.push((entry.clone(), format!(
-                                    "Storage mutation to key '{}' detected without authorization for a relevant actor in frame '{}'. Authorized actors: {:?}",
+                                    "Storage mutation to key '{}' detected without authorization for a relevant actor in function '{}' frame '{}'. Authorized actors: {:?}",
                                     key,
+                                    function_name,
                                     frame.function.as_deref().unwrap_or("unknown"),
                                     authorized_actors.keys().collect::<Vec<_>>()
                                 )));
                             }
                         }
                     } else {
-                        problematic_writes.push((entry.clone(), format!("Storage mutation detected without any preceding authorization in frame '{}'.", frame.function.as_deref().unwrap_or("unknown"))));
+                        problematic_writes.push((entry.clone(), format!("Storage mutation detected without any preceding authorization in function '{}' frame '{}'.", function_name, frame.function.as_deref().unwrap_or("unknown"))));
+                    }
+                } else if let Some(authorized_actors) = auth_actors_per_function.get(&function_name)
+                {
+                    if let Some(key) = &entry.storage_key {
+                        let covered = authorized_actors.keys().any(|addr| key.contains(addr));
+                        if !covered && !authorized_actors.is_empty() {
+                            problematic_writes.push((entry.clone(), format!(
+                                "Storage mutation to key '{}' detected without relevant authorization in function '{}'. Authorized actors: {:?}",
+                                key,
+                                function_name,
+                                authorized_actors.keys().collect::<Vec<_>>()
+                            )));
+                        }
                     }
                 } else {
-                    problematic_writes.push((entry.clone(), "Storage mutation detected without frame metadata or preceding authorization.".to_string()));
+                    problematic_writes.push((entry.clone(), format!("Storage mutation detected without frame metadata or preceding authorization in function '{}'.", function_name)));
                 }
             }
         }
@@ -649,6 +706,27 @@ struct FrameKey {
     call_depth: Option<u64>,
 }
 
+impl FrameKey {
+    /// Check whether two frame keys refer to the same logical call frame.
+    ///
+    /// `function` is treated as a strong signal when available. When the
+    /// runtime omits the function name, call depth is still used to correlate
+    /// events from the same frame.
+    fn matches(&self, other: &FrameKey) -> bool {
+        if let (Some(a), Some(b)) = (self.call_depth, other.call_depth) {
+            if a != b {
+                return false;
+            }
+        }
+
+        match (&self.function, &other.function) {
+            (Some(a), Some(b)) => a == b,
+            (None, None) => self.call_depth.is_some() && other.call_depth.is_some(),
+            _ => self.call_depth.is_some() && other.call_depth.is_some(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PendingCrossCall {
     frame: Option<FrameKey>,
@@ -656,6 +734,8 @@ struct PendingCrossCall {
     pre_call_write_seen: bool,
     inferred: bool,
     call_depth: Option<u64>,
+    function: Option<String>,
+    caller: Option<String>,
 }
 
 struct CrossContractImportRule;
@@ -1374,7 +1454,7 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                 };
 
                 let same_frame = match (&pending.frame, &active_frame) {
-                    (Some(expected), Some(actual)) => expected == actual,
+                    (Some(expected), Some(actual)) => expected.matches(actual),
                     _ => false,
                 };
 
@@ -1419,6 +1499,20 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     .map(|s| s.as_str())
                     .unwrap_or("unknown");
                 let storage_key = entry.storage_key.as_deref().unwrap_or("unknown");
+                let write_frame_name = active_frame
+                    .as_ref()
+                    .and_then(|f| f.function.as_deref())
+                    .unwrap_or("unknown");
+                let call_fn = pending.function.as_deref().unwrap_or(func_name);
+                let call_depth = pending
+                    .call_depth
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let write_depth = entry
+                    .call_depth
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let caller = pending.caller.as_deref().unwrap_or("unknown");
 
                 findings.push(SecurityFinding {
                     rule_id: "reentrancy-pattern".to_string(),
@@ -1427,12 +1521,25 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     } else {
                         Severity::Low
                     },
-                    location: format!("Trace event {}", entry.sequence),
-                    description: "Storage write detected after an external contract call in the same execution frame. Possible reentrancy risk.".to_string(),
-                    remediation: "Follow checks-effects-interactions: finalize critical state before external calls, or isolate post-call writes to benign bookkeeping.".to_string(),
+                    location: format!("Trace events {} -> {}", pending.sequence, entry.sequence),
+                    description: format!(
+                        "Cross-contract call in '{}' (caller '{}', depth {}) at event {} was followed by storage write to '{}' in '{}' (depth {}) at event {}.",
+                        call_fn,
+                        caller,
+                        call_depth,
+                        pending.sequence,
+                        storage_key,
+                        write_frame_name,
+                        write_depth,
+                        entry.sequence
+                    ),
+                    remediation: "Apply checks-effects-interactions: perform critical state updates before external calls, guard re-entry paths, and restrict post-call writes to idempotent bookkeeping.".to_string(),
                     confidence: Some(confidence),
                     rationale: Some(rationale),
-                    fingerprint: format!("{}:{}:{}", "reentrancy-pattern", func_name, storage_key),
+                    fingerprint: format!(
+                        "{}:{}:{}:{}",
+                        "reentrancy-pattern", pending.sequence, entry.sequence, storage_key
+                    ),
                     suppressed: false,
                 });
                 pending_cross_call = None;
@@ -1441,7 +1548,7 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                 let frame = active_frame.clone();
                 let pre_call_write_seen = frame
                     .as_ref()
-                    .and_then(|key| writes_seen_by_frame.get(key).copied())
+                    .map(|key| find_writes_seen_by_frame(&writes_seen_by_frame, key))
                     .unwrap_or(0)
                     > 0;
 
@@ -1451,6 +1558,8 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                     pre_call_write_seen,
                     inferred: active_frame.is_none(),
                     call_depth: entry.call_depth, // Match Option<usize>
+                    function: entry.function.clone(),
+                    caller: entry.caller.clone(),
                 });
             }
             DynamicTraceEventKind::CrossContractReturn => {
@@ -1460,7 +1569,7 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
                 let returning_frame = active_frame.clone();
                 if let Some(ref pending) = pending_cross_call {
                     let frames_match = match (&pending.frame, &returning_frame) {
-                        (Some(p), Some(r)) => p == r,
+                        (Some(p), Some(r)) => p.matches(r),
                         // If the return has no depth info, clear conservatively
                         (_, None) => true,
                         _ => false,
@@ -1484,13 +1593,48 @@ fn analyze_reentrancy_pattern_dynamic(trace: &[DynamicTraceEvent]) -> Vec<Securi
     findings
 }
 
+fn find_writes_seen_by_frame(
+    writes_seen_by_frame: &HashMap<FrameKey, usize>,
+    frame: &FrameKey,
+) -> usize {
+    if let Some(count) = writes_seen_by_frame.get(frame) {
+        return *count;
+    }
+
+    if frame.call_depth.is_some() {
+        writes_seen_by_frame
+            .iter()
+            .filter(|(key, _)| key.matches(frame))
+            .map(|(_, &count)| count)
+            .sum()
+    } else {
+        0
+    }
+}
+
 fn frame_key_for(entry: &DynamicTraceEvent) -> Option<FrameKey> {
-    let function = entry.function.clone()?;
+    if entry.function.is_none() && entry.call_depth.is_none() {
+        return None;
+    }
 
     Some(FrameKey {
-        function: Some(function),
+        function: entry.function.clone(),
         call_depth: entry.call_depth,
     })
+}
+
+fn effective_actor(entry: &DynamicTraceEvent) -> Option<String> {
+    entry.address.clone().or_else(|| {
+        entry
+            .message
+            .split_whitespace()
+            .find(|w| (w.starts_with('G') || w.starts_with('C')) && w.len() == 56)
+            .map(|s| s.to_string())
+    })
+}
+
+fn function_scope(function: Option<&str>) -> String {
+    function.unwrap_or("unknown").to_string()
 }
 
 #[cfg(test)]
@@ -1769,7 +1913,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn make_event(seq: usize, kind: DynamicTraceEventKind, depth: usize) -> DynamicTraceEvent {
-        DynamicTraceEvent {
+        DynamicTraceEvent { invocation_reason: None, 
             sequence: seq,
             kind,
             message: String::new(),
@@ -1779,6 +1923,7 @@ mod tests {
             storage_value: None,
             call_depth: Some(depth as u64),
             address: None,
+            invocation_reason: None,
         }
     }
 
@@ -1846,13 +1991,101 @@ mod tests {
         assert_eq!(findings[0].rule_id, "reentrancy-pattern");
     }
 
+    #[test]
+    fn frame_key_for_allows_call_depth_without_function() {
+        let event = DynamicTraceEvent { invocation_reason: None, 
+            sequence: 0,
+            kind: DynamicTraceEventKind::CrossContractCall,
+            message: String::new(),
+            caller: None,
+            function: None,
+            call_depth: Some(1),
+            storage_key: None,
+            storage_value: None,
+            address: None,
+            invocation_reason: None,
+        };
+
+        let frame = frame_key_for(&event).expect("expected frame key for call-depth-only event");
+        assert_eq!(frame.call_depth, Some(1));
+        assert!(frame.function.is_none());
+    }
+
+    #[test]
+    fn reentrancy_rule_matches_same_depth_when_cross_call_function_missing() {
+        let findings = analyze_reentrancy_pattern_dynamic(&[
+            DynamicTraceEvent { invocation_reason: None, 
+                sequence: 1,
+                kind: DynamicTraceEventKind::CrossContractCall,
+                message: "unknown frame call".to_string(),
+                caller: None,
+                function: None,
+                call_depth: Some(0),
+                storage_key: None,
+                storage_value: None,
+                address: None,
+                invocation_reason: None,
+            },
+            DynamicTraceEvent { invocation_reason: None, 
+                sequence: 2,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write balance".to_string(),
+                caller: None,
+                function: Some("withdraw".to_string()),
+                call_depth: Some(0),
+                storage_key: Some("balance:alice".to_string()),
+                storage_value: Some("0".to_string()),
+                address: None,
+                invocation_reason: None,
+            },
+        ]);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "reentrancy-pattern");
+        assert!(matches!(findings[0].severity, Severity::High));
+    }
+
+    #[test]
+    fn reentrancy_rule_matches_same_depth_when_write_function_missing() {
+        let findings = analyze_reentrancy_pattern_dynamic(&[
+            DynamicTraceEvent { invocation_reason: None, 
+                sequence: 1,
+                kind: DynamicTraceEventKind::CrossContractCall,
+                message: "withdraw invokes external".to_string(),
+                caller: None,
+                function: Some("withdraw".to_string()),
+                call_depth: Some(0),
+                storage_key: None,
+                storage_value: None,
+                address: None,
+                invocation_reason: None,
+            },
+            DynamicTraceEvent { invocation_reason: None, 
+                sequence: 2,
+                kind: DynamicTraceEventKind::StorageWrite,
+                message: "write balance".to_string(),
+                caller: None,
+                function: None,
+                call_depth: Some(0),
+                storage_key: Some("balance:alice".to_string()),
+                storage_value: Some("0".to_string()),
+                address: None,
+                invocation_reason: None,
+            },
+        ]);
+
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].rule_id, "reentrancy-pattern");
+        assert!(matches!(findings[0].severity, Severity::High));
+    }
+
     // Pre-existing tests (unchanged)
 
     #[test]
     fn unbounded_iteration_dynamic_flags_high_risk_pattern() {
         let mut trace = Vec::new();
         for i in 0..90usize {
-            trace.push(DynamicTraceEvent {
+            trace.push(DynamicTraceEvent { invocation_reason: None, 
                 sequence: i,
                 kind: DynamicTraceEventKind::StorageRead,
                 message: "contract_storage_get".to_string(),
@@ -1862,6 +2095,7 @@ mod tests {
                 storage_key: Some(format!("user:{}", i % 4)),
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             });
         }
 
@@ -1874,7 +2108,7 @@ mod tests {
     fn storage_write_pressure_dynamic_flags_hot_state_mutation() {
         let mut trace = Vec::new();
         for i in 0..40usize {
-            trace.push(DynamicTraceEvent {
+            trace.push(DynamicTraceEvent { invocation_reason: None, 
                 sequence: i,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "storage_put".to_string(),
@@ -1884,6 +2118,7 @@ mod tests {
                 storage_key: Some(format!("bucket:{}", i % 2)),
                 storage_value: Some(format!("{i}")),
                 address: None,
+                invocation_reason: None,
             });
         }
 
@@ -1901,7 +2136,7 @@ mod tests {
     #[test]
     fn reentrancy_rule_flags_same_frame_write_after_cross_contract_call() {
         let findings = analyze_reentrancy_pattern_dynamic(&[
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::FunctionCall,
                 message: "main -> withdraw".to_string(),
@@ -1911,8 +2146,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 2,
                 kind: DynamicTraceEventKind::CrossContractCall,
                 message: "withdraw invokes token.transfer".to_string(),
@@ -1922,8 +2158,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 3,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write balance".to_string(),
@@ -1933,6 +2170,7 @@ mod tests {
                 storage_key: Some("balance:alice".to_string()),
                 storage_value: Some("0".to_string()),
                 address: None,
+                invocation_reason: None,
             },
         ]);
 
@@ -1950,7 +2188,7 @@ mod tests {
     #[test]
     fn reentrancy_rule_skips_post_call_write_when_pre_call_effect_seen_in_same_frame() {
         let findings = analyze_reentrancy_pattern_dynamic(&[
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::FunctionCall,
                 message: "main -> settle".to_string(),
@@ -1960,8 +2198,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 2,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "mark settled".to_string(),
@@ -1971,8 +2210,9 @@ mod tests {
                 storage_key: Some("settled:alice".to_string()),
                 storage_value: Some("true".to_string()),
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 3,
                 kind: DynamicTraceEventKind::CrossContractCall,
                 message: "settle invokes payout".to_string(),
@@ -1982,8 +2222,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 4,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "emit bookkeeping marker".to_string(),
@@ -1993,6 +2234,7 @@ mod tests {
                 storage_key: Some("audit:last_settle".to_string()),
                 storage_value: Some("1".to_string()),
                 address: None,
+                invocation_reason: None,
             },
         ]);
 
@@ -2002,7 +2244,7 @@ mod tests {
     #[test]
     fn reentrancy_rule_skips_write_in_different_frame_after_cross_contract_call() {
         let findings = analyze_reentrancy_pattern_dynamic(&[
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::FunctionCall,
                 message: "main -> withdraw".to_string(),
@@ -2012,8 +2254,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 2,
                 kind: DynamicTraceEventKind::CrossContractCall,
                 message: "withdraw invokes token.transfer".to_string(),
@@ -2023,8 +2266,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 3,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "nested contract writes receipt".to_string(),
@@ -2034,6 +2278,7 @@ mod tests {
                 storage_key: Some("receipt:1".to_string()),
                 storage_value: Some("ok".to_string()),
                 address: None,
+                invocation_reason: None,
             },
         ]);
 
@@ -2121,7 +2366,7 @@ mod tests {
         let rule = AuthorizationCheckRule;
 
         let trace = vec![
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 0,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key1".to_string(),
@@ -2131,8 +2376,9 @@ mod tests {
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::Authorization,
                 message: "auth check".to_string(),
@@ -2142,15 +2388,14 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
         ];
 
         let findings = rule.analyze_dynamic(None, &trace).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule_id, "missing-auth");
-        assert!(findings[0]
-            .description
-            .contains("before any authorization in frame 'test_function'"));
+        assert!(findings[0].description.contains("before any authorization"));
     }
 
     #[test]
@@ -2158,7 +2403,7 @@ mod tests {
         let rule = AuthorizationCheckRule;
 
         let trace = vec![
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 0,
                 kind: DynamicTraceEventKind::Authorization,
                 message: "auth check".to_string(),
@@ -2168,8 +2413,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: Some("G123...".to_string()),
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key1".to_string(),
@@ -2179,6 +2425,7 @@ mod tests {
                 storage_key: Some("key1:G123...".to_string()),
                 storage_value: Some("value1".to_string()),
                 address: None,
+                invocation_reason: None,
             },
         ];
 
@@ -2191,7 +2438,7 @@ mod tests {
         let rule = AuthorizationCheckRule;
 
         let trace = vec![
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 0,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key1".to_string(),
@@ -2201,8 +2448,9 @@ mod tests {
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key2".to_string(),
@@ -2212,8 +2460,9 @@ mod tests {
                 storage_key: Some("key2".to_string()),
                 storage_value: Some("value2".to_string()),
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 2,
                 kind: DynamicTraceEventKind::Authorization,
                 message: "auth check".to_string(),
@@ -2223,15 +2472,14 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
         ];
 
         let findings = rule.analyze_dynamic(None, &trace).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].rule_id, "missing-auth");
-        assert!(findings[0]
-            .description
-            .contains("before any authorization in frame 'test_function'"));
+        assert!(findings[0].description.contains("before any authorization"));
     }
 
     #[test]
@@ -2239,7 +2487,7 @@ mod tests {
         let rule = AuthorizationCheckRule;
 
         let trace = vec![
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 0,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key1".to_string(),
@@ -2249,8 +2497,9 @@ mod tests {
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key2".to_string(),
@@ -2260,6 +2509,7 @@ mod tests {
                 storage_key: Some("key2".to_string()),
                 storage_value: Some("value2".to_string()),
                 address: None,
+                invocation_reason: None,
             },
         ];
 
@@ -2268,7 +2518,7 @@ mod tests {
         assert_eq!(findings[0].rule_id, "missing-auth");
         assert!(findings[0]
             .description
-            .contains("without any preceding authorization in frame 'test_function'"));
+            .contains("without any preceding authorization"));
     }
 
     #[test]
@@ -2277,7 +2527,7 @@ mod tests {
 
         // Test case: Authorization happens in depth 1 (e.g. nested call), but write happens in depth 0
         let trace = vec![
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 0,
                 kind: DynamicTraceEventKind::Authorization,
                 message: "auth check inside nested".to_string(),
@@ -2287,8 +2537,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 address: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write key1 in main".to_string(),
@@ -2298,6 +2549,7 @@ mod tests {
                 storage_key: Some("key1".to_string()),
                 storage_value: Some("value1".to_string()),
                 address: None,
+                invocation_reason: None,
             },
         ];
 
@@ -2306,7 +2558,7 @@ mod tests {
         assert_eq!(findings[0].rule_id, "missing-auth");
         assert!(findings[0]
             .description
-            .contains("without any preceding authorization in frame 'main_function'"));
+            .contains("without any preceding authorization"));
     }
 
     #[test]
@@ -2314,7 +2566,7 @@ mod tests {
         let rule = AuthorizationCheckRule;
 
         let trace = vec![
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 0,
                 kind: DynamicTraceEventKind::Authorization,
                 message: "authorized G_ALICE".to_string(),
@@ -2326,8 +2578,9 @@ mod tests {
                 storage_key: None,
                 storage_value: None,
                 caller: None,
+                invocation_reason: None,
             },
-            DynamicTraceEvent {
+            DynamicTraceEvent { invocation_reason: None, 
                 sequence: 1,
                 kind: DynamicTraceEventKind::StorageWrite,
                 message: "write G_BOB data".to_string(),
@@ -2339,6 +2592,7 @@ mod tests {
                 call_depth: Some(0),
                 address: None,
                 caller: None,
+                invocation_reason: None,
             },
         ];
 

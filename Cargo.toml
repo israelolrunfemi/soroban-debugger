@@ -102,6 +102,7 @@ is-terminal = "0.4"
 
 # REPL and readline
 rustyline = "13.0"
+shlex = "1.3"
 
 # Flame graph generation
 inferno = "0.11"
@@ -144,6 +145,9 @@ clap = { version = "4.5", features = ["derive", "cargo", "env"] }
 clap_mangen = "0.2"
 clap_complete = "4.5"
 
+[features]
+network-tests = []
+
 [profile.release]
 opt-level = 3
 lto = true
@@ -153,6 +157,11 @@ strip = true
 [[bin]]
 name = "soroban-debug"
 path = "src/main.rs"
+bench = false
+
+[[bin]]
+name = "bench-regression"
+path = "src/bin/bench-regression.rs"
 bench = false
 
 [lib]

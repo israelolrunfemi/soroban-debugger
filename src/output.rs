@@ -2,7 +2,7 @@
 //!
 //! Supports `NO_COLOR` (disable ANSI colors) and `--no-unicode` (ASCII-only output).
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static NO_UNICODE: AtomicBool = AtomicBool::new(false);
@@ -19,6 +19,98 @@ pub enum OutputStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputError {
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PluginIncidentType {
+    Panic,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationReason {
+    Entrypoint,
+    CrossContract,
+    Replay,
+    Plugin,
+}
+
+impl InvocationReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Entrypoint => "entrypoint",
+            Self::CrossContract => "cross_contract",
+            Self::Replay => "replay",
+            Self::Plugin => "plugin",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplayArtifactKind {
+    Manifest,
+    Trace,
+    ContractWasm,
+    NetworkSnapshot,
+    StorageImport,
+    StorageExport,
+    OutputReport,
+    GeneratedTest,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReplayArtifactFile {
+    pub kind: ReplayArtifactKind,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ReplayArtifactManifest {
+    pub schema_version: String,
+    pub artifact_group: String,
+    pub created_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function: Option<String>,
+    pub files: Vec<ReplayArtifactFile>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PluginIncidentReport {
+    pub plugin: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub library_path: Option<String>,
+    pub invocation_kind: String,
+    pub incident: PluginIncidentType,
+    pub action_taken: String,
+    pub core_debugger_status: String,
+    pub message: String,
+}
+
+impl PluginIncidentReport {
+    pub fn summary_line(&self) -> String {
+        format!(
+            "Plugin incident: '{}' {} during {}. Action: {}. Core debugger status: {}.",
+            self.plugin,
+            match self.incident {
+                PluginIncidentType::Panic => "panicked",
+                PluginIncidentType::Timeout => "timed out",
+            },
+            self.invocation_kind,
+            self.action_taken,
+            self.core_debugger_status
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +150,52 @@ where
             }),
         }
     }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SymbolicReplayBundle {
+    pub schema_version: u8,
+    pub command: String,
+
+    pub contract: ContractInfo,
+    pub invocation: InvocationInfo,
+    pub config: ReplayConfig,
+
+    pub storage_seed: Option<StorageSeed>,
+    pub metadata: Option<ReplayMetadata>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ContractInfo {
+    pub sha256: String,
+    pub path_hint: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct InvocationInfo {
+    pub function: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReplayConfig {
+    pub seed: Option<u64>,
+    pub max_paths: Option<usize>,
+    pub max_input_combinations: Option<usize>,
+    pub max_breadth: Option<usize>,
+    pub max_depth: Option<usize>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct StorageSeed {
+    pub format: String,
+    pub data: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReplayMetadata {
+    pub paths_explored: usize,
+    pub panics_found: usize,
 }
 
 /// Global output/accessibility configuration.
@@ -144,6 +282,27 @@ impl OutputConfig {
     }
 }
 
+pub fn format_resource_timeline(timeline: &[crate::inspector::budget::ResourceCheckpoint]) -> String {
+    let mut out = String::new();
+    use std::fmt::Write;
+    
+    writeln!(out, "| Timestamp (ms) | CPU Instructions | Memory Bytes | Location |").unwrap();
+    writeln!(out, "|----------------|------------------|--------------|----------|").unwrap();
+    
+    for checkpoint in timeline {
+        writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            checkpoint.timestamp_ms,
+            checkpoint.cpu_instructions,
+            checkpoint.memory_bytes,
+            checkpoint.location_name
+        ).unwrap();
+    }
+    
+    out
+}
+
 /// Status kind for text-equivalent labels (screen reader friendly).
 #[derive(Clone, Copy)]
 pub enum StatusLabel {
@@ -211,5 +370,99 @@ impl OutputWriter {
                 .map_err(|e| miette::miette!("Failed to write to output file: {}", e))?;
         }
         Ok(())
+    }
+}
+
+/// Formats a resource timeline as a markdown table.
+pub fn format_resource_timeline(
+    timeline: &[crate::inspector::budget::ResourceCheckpoint],
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "| Time (ms) | CPU Instructions | Memory Bytes | Location |"
+    );
+    let _ = writeln!(
+        out,
+        "|-----------|------------------|--------------|----------|"
+    );
+    for point in timeline {
+        let _ = writeln!(
+            out,
+            "| {} | {} | {} | {} |",
+            point.timestamp_ms, point.cpu_instructions, point.memory_bytes, point.location_name
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_replay_bundle_serializes() {
+        let bundle = SymbolicReplayBundle {
+            schema_version: 1,
+            command: "symbolic".to_string(),
+            contract: ContractInfo {
+                sha256: "abc".to_string(),
+                path_hint: None,
+            },
+            invocation: InvocationInfo {
+                function: "test".to_string(),
+            },
+            config: ReplayConfig {
+                seed: Some(1),
+                max_paths: None,
+                max_input_combinations: None,
+                max_breadth: None,
+                max_depth: None,
+                timeout_secs: None,
+            },
+            storage_seed: None,
+            metadata: None,
+        };
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(json.contains("schema_version"));
+        assert!(json.contains("symbolic"));
+    }
+
+    #[test]
+    fn test_replay_bundle_optional_fields_serialization() {
+        let bundle = SymbolicReplayBundle {
+            schema_version: 1,
+            command: "symbolic".to_string(),
+            contract: ContractInfo {
+                sha256: "abc".to_string(),
+                path_hint: Some("contract.wasm".to_string()),
+            },
+            invocation: InvocationInfo {
+                function: "test".to_string(),
+            },
+            config: ReplayConfig {
+                seed: None,
+                max_paths: Some(10),
+                max_input_combinations: Some(20),
+                max_breadth: Some(2),
+                max_depth: Some(3),
+                timeout_secs: Some(30),
+            },
+            storage_seed: Some(StorageSeed {
+                format: "json".to_string(),
+                data: "{}".to_string(),
+            }),
+            metadata: Some(ReplayMetadata {
+                paths_explored: 5,
+                panics_found: 1,
+            }),
+        };
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(json.contains("storage_seed"));
+        assert!(json.contains("metadata"));
+        assert!(json.contains("contract.wasm"));
     }
 }

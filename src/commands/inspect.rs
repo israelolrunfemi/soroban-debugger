@@ -1,11 +1,14 @@
-use std::path::Path;
 use crate::{
     cli::args::OutputFormat,
-    utils::wasm::{extract_contract_metadata, get_module_info, parse_function_signatures, parse_functions},
+    utils::wasm::{
+        extract_contract_metadata, extract_wasm_artifact_metadata, get_module_info,
+        parse_function_signatures, parse_functions,
+    },
     InspectArgs, Result,
 };
 use colored::Colorize;
 use serde::Serialize;
+use std::path::Path;
 
 const BAR_WIDTH: usize = 54;
 
@@ -17,7 +20,10 @@ pub fn run(args: &InspectArgs) -> Result<()> {
 
     if let Some(expected) = &args.expected_hash {
         if expected.to_lowercase() != wasm_hash {
-            return Err(crate::DebuggerError::ChecksumMismatch(expected.clone(), wasm_hash.clone())
+            return Err(crate::DebuggerError::ChecksumMismatch(
+                expected.clone(),
+                wasm_hash.clone(),
+            )
             .into());
         }
     }
@@ -45,6 +51,7 @@ struct FunctionSignatureJson {
     params: Vec<FunctionParam>,
     #[serde(skip_serializing_if = "Option::is_none")]
     return_type: Option<String>,
+    has_source_debug: bool,
 }
 
 #[derive(Serialize)]
@@ -57,6 +64,9 @@ struct FunctionListing {
 struct SourceMapReport {
     mappings_count: usize,
     diagnostics: Vec<crate::debugger::source_map::SourceMapDiagnostic>,
+    units_processed: usize,
+    units_with_line_program: usize,
+    coverage_ratio: f64,
 }
 
 #[derive(Serialize)]
@@ -67,23 +77,34 @@ struct FullReport {
     functions: Vec<String>,
     signatures: Vec<crate::utils::wasm::FunctionSignature>,
     metadata: crate::utils::wasm::ContractMetadata,
+    artifact_metadata: crate::utils::wasm::WasmArtifactMetadata,
     source_map: SourceMapReport,
 }
 
 fn output_functions(path: &Path, wasm_bytes: &[u8], format: OutputFormat) -> Result<()> {
     let signatures = parse_function_signatures(wasm_bytes)?;
+    let mut source_map = crate::debugger::source_map::SourceMap::new();
+    let _ = source_map.load(wasm_bytes);
 
     match format {
         OutputFormat::Json => {
             let functions = signatures
                 .into_iter()
-                .map(|sig| FunctionSignatureJson {
-                    name: sig.name,
-                    params: sig.params.into_iter().map(|p| FunctionParam {
-                        name: p.name,
-                        type_name: p.type_name,
-                    }).collect(),
-                    return_type: sig.return_type.filter(|r| r != "Void"),
+                .map(|sig| {
+                    let has_debug = source_map.function_has_source_mapped(wasm_bytes, &sig.name);
+                    FunctionSignatureJson {
+                        name: sig.name,
+                        params: sig
+                            .params
+                            .into_iter()
+                            .map(|p| FunctionParam {
+                                name: p.name,
+                                type_name: p.type_name,
+                            })
+                            .collect(),
+                        return_type: sig.return_type.filter(|r| r != "Void"),
+                        has_source_debug: has_debug,
+                    }
                 })
                 .collect();
 
@@ -95,11 +116,15 @@ fn output_functions(path: &Path, wasm_bytes: &[u8], format: OutputFormat) -> Res
             println!("{}", serde_json::to_string_pretty(&listing)?);
             Ok(())
         }
-        OutputFormat::Pretty => print_pretty_functions(&signatures, wasm_bytes),
+        OutputFormat::Pretty => print_pretty_functions(&signatures, wasm_bytes, &source_map),
     }
 }
 
-fn print_pretty_functions(signatures: &[crate::utils::wasm::FunctionSignature], wasm_bytes: &[u8]) -> Result<()> {
+fn print_pretty_functions(
+    signatures: &[crate::utils::wasm::FunctionSignature],
+    wasm_bytes: &[u8],
+    source_map: &crate::debugger::source_map::SourceMap,
+) -> Result<()> {
     if signatures.is_empty() {
         let functions = parse_functions(wasm_bytes).unwrap_or_default();
         if functions.is_empty() {
@@ -107,24 +132,58 @@ fn print_pretty_functions(signatures: &[crate::utils::wasm::FunctionSignature], 
         } else {
             println!("(no contractspecv0 section found)\nBare functions exported:");
             for f in functions {
-                println!("  {}", f);
+                let has_debug = source_map.function_has_source_mapped(wasm_bytes, &f);
+                let debug_str = if has_debug {
+                    " (Source/Debug: Yes)"
+                } else {
+                    ""
+                };
+                println!("  {}{}", f, debug_str);
             }
         }
     } else {
-        let name_w = signatures.iter().map(|s| s.name.len()).max().unwrap_or(8);
-        println!("{:<name_w$}  Signature", "Function", name_w = name_w);
-        println!("{}  {}", "─".repeat(name_w), "─".repeat(BAR_WIDTH - name_w - 4));
+        let name_w = std::cmp::max(
+            signatures.iter().map(|s| s.name.len()).max().unwrap_or(8),
+            8,
+        );
+        println!(
+            "{:<name_w$}  {:<45}  Source/Debug",
+            "Function",
+            "Signature",
+            name_w = name_w
+        );
+        println!(
+            "{}  {}  {}",
+            "─".repeat(name_w),
+            "─".repeat(45),
+            "─".repeat(12)
+        );
 
         for sig in signatures {
-            let params = sig.params.iter()
+            let params = sig
+                .params
+                .iter()
                 .map(|p| format!("{}: {}", p.name, p.type_name))
                 .collect::<Vec<_>>()
                 .join(", ");
-            let ret = sig.return_type.as_ref()
+            let ret = sig
+                .return_type
+                .as_ref()
                 .filter(|t| t != "Void")
                 .map(|t| format!(" -> {t}"))
                 .unwrap_or_default();
-            println!("{:<name_w$}  ({}){ret}", sig.name, params, name_w = name_w);
+
+            let sig_str = format!("({}){}", params, ret);
+            let has_debug = source_map.function_has_source_mapped(wasm_bytes, &sig.name);
+            let debug_str = if has_debug { "Yes" } else { "No" };
+
+            println!(
+                "{:<name_w$}  {:<45}  {}",
+                sig.name,
+                sig_str,
+                debug_str,
+                name_w = name_w
+            );
         }
     }
     Ok(())
@@ -135,6 +194,7 @@ fn print_json_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
     let functions = parse_functions(wasm_bytes)?;
     let signatures = parse_function_signatures(wasm_bytes)?;
     let metadata = extract_contract_metadata(wasm_bytes)?;
+    let artifact_metadata = extract_wasm_artifact_metadata(wasm_bytes)?;
 
     let mut source_map = crate::debugger::source_map::SourceMap::new();
     let _ = source_map.load(wasm_bytes);
@@ -146,9 +206,17 @@ fn print_json_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
         functions,
         signatures,
         metadata,
+        artifact_metadata,
         source_map: SourceMapReport {
             mappings_count: source_map.len(),
             diagnostics: source_map.diagnostics.clone(),
+            units_processed: source_map.units_processed,
+            units_with_line_program: source_map.units_with_line_program,
+            coverage_ratio: if source_map.units_processed > 0 {
+                source_map.units_with_line_program as f64 / source_map.units_processed as f64
+            } else {
+                0.0
+            },
         },
     };
 
@@ -163,6 +231,7 @@ fn print_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
     let info = get_module_info(wasm_bytes)?;
     let signatures = parse_function_signatures(wasm_bytes)?;
     let metadata = extract_contract_metadata(wasm_bytes)?;
+    let artifact_metadata = extract_wasm_artifact_metadata(wasm_bytes)?;
 
     let separator = "═".repeat(BAR_WIDTH);
     let size_kb = wasm_bytes.len() as f64 / 1024.0;
@@ -171,25 +240,52 @@ fn print_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
     log_both(&format!("  {}", "Soroban Contract Inspector".bold().cyan()));
     log_both(&separator);
     log_both("");
-    log_both(&format!("  File : {}", path.display().to_string().bright_white()));
-    log_both(&format!("  Size : {} ({:.2} KB)\n", 
-        format!("{} bytes", wasm_bytes.len()).bright_white(), size_kb));
+    log_both(&format!(
+        "  File : {}",
+        path.display().to_string().bright_white()
+    ));
+    log_both(&format!(
+        "  Size : {} ({:.2} KB)\n",
+        format!("{} bytes", wasm_bytes.len()).bright_white(),
+        size_kb
+    ));
 
     print_section("Module Statistics", || {
-        log_both(&format!("  Types      : {}", info.type_count.to_string().bright_white()));
-        log_both(&format!("  Functions  : {}", info.function_count.to_string().bright_white()));
-        log_both(&format!("  Exports    : {}\n", info.export_count.to_string().bright_white()));
+        log_both(&format!(
+            "  Types      : {}",
+            info.type_count.to_string().bright_white()
+        ));
+        log_both(&format!(
+            "  Functions  : {}",
+            info.function_count.to_string().bright_white()
+        ));
+        log_both(&format!(
+            "  Exports    : {}\n",
+            info.export_count.to_string().bright_white()
+        ));
     });
 
     print_section("WASM Section Breakdown", || {
-        log_both(&format!("  {:<20} | {:>10} | {:>6}", "Section", "Size", "Total%"));
-        log_both(&format!("  {}|{}|{}", "─".repeat(21), "─".repeat(12), "─".repeat(8)));
+        log_both(&format!(
+            "  {:<20} | {:>10} | {:>6}",
+            "Section", "Size", "Total%"
+        ));
+        log_both(&format!(
+            "  {}|{}|{}",
+            "─".repeat(21),
+            "─".repeat(12),
+            "─".repeat(8)
+        ));
 
         for section in &info.sections {
             let percentage = (section.size as f64 / info.total_size as f64) * 100.0;
-            let row = format!("  {:<20} | {:>10} | {:>5.1}%", 
-                section.name, format!("{} B", section.size), percentage);
-            
+            let row = format!(
+                "  {:<20} | {:>10} | {:>5.1}%",
+                section.name,
+                format!("{} B", section.size),
+                percentage
+            );
+
             let styled = if section.size > 50 * 1024 || percentage > 50.0 {
                 row.red().bold().to_string()
             } else if section.size > 10 * 1024 {
@@ -215,19 +311,36 @@ fn print_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
             }
         } else {
             let name_w = signatures.iter().map(|s| s.name.len()).max().unwrap_or(8);
-            log_both(&format!("  {:<name_w$}  Signature", "Function", name_w = name_w));
-            log_both(&format!("  {}  {}", "─".repeat(name_w), "─".repeat(BAR_WIDTH - name_w - 4)));
+            log_both(&format!(
+                "  {:<name_w$}  Signature",
+                "Function",
+                name_w = name_w
+            ));
+            log_both(&format!(
+                "  {}  {}",
+                "─".repeat(name_w),
+                "─".repeat(BAR_WIDTH - name_w - 4)
+            ));
 
             for sig in &signatures {
-                let params = sig.params.iter()
+                let params = sig
+                    .params
+                    .iter()
                     .map(|p| format!("{}: {}", p.name, p.type_name))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let ret = sig.return_type.as_ref()
+                let ret = sig
+                    .return_type
+                    .as_ref()
                     .filter(|t| t != "Void")
                     .map(|t| format!(" -> {t}"))
                     .unwrap_or_default();
-                log_both(&format!("  {:<name_w$}  ({}){ret}", sig.name, params, name_w = name_w));
+                log_both(&format!(
+                    "  {:<name_w$}  ({}){ret}",
+                    sig.name,
+                    params,
+                    name_w = name_w
+                ));
             }
         }
     });
@@ -242,6 +355,48 @@ fn print_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
             log_both_if_some("Author / Org", &metadata.author);
             log_both_if_some("Description", &metadata.description);
             log_both_if_some("Implementation", &metadata.implementation);
+        }
+    });
+
+    print_section("Artifact Metadata", || {
+        log_both(&format!(
+            "  Build Profile Hint : {}",
+            artifact_metadata.build_profile_hint
+        ));
+        log_both(&format!(
+            "  Optimization Hint  : {}",
+            artifact_metadata.optimization_hint
+        ));
+        log_both(&format!(
+            "  Name Section       : {}",
+            if artifact_metadata.name_section_present {
+                "present"
+            } else {
+                "absent"
+            }
+        ));
+        log_both(&format!(
+            "  DWARF Sections     : {}",
+            if artifact_metadata.has_debug_sections {
+                if artifact_metadata.debug_sections.is_empty() {
+                    "present".to_string()
+                } else {
+                    format!(
+                        "{} ({} bytes)",
+                        artifact_metadata.debug_sections.join(", "),
+                        artifact_metadata.debug_section_bytes
+                    )
+                }
+            } else {
+                "absent".to_string()
+            }
+        ));
+        log_both_if_some("Module Name", &artifact_metadata.module_name);
+        if !artifact_metadata.package_hints.is_empty() {
+            log_both("  Package Hints:");
+            for hint in &artifact_metadata.package_hints {
+                log_both(&format!("    - {}", hint));
+            }
         }
     });
 
@@ -265,10 +420,42 @@ fn print_report(path: &Path, wasm_bytes: &[u8]) -> Result<()> {
     if source_map.is_empty() && source_map.diagnostics.is_empty() {
         log_both("  No DWARF debug information found in this contract.");
     } else {
-        log_both(&format!("  Mapped Executable Lines : {}", source_map.len().to_string().bright_white()));
+        log_both(&format!(
+            "  Mapped Executable Lines : {}",
+            source_map.len().to_string().bright_white()
+        ));
+        log_both(&format!(
+            "  DWARF Units Processed   : {}",
+            source_map.units_processed.to_string().bright_white()
+        ));
+        log_both(&format!(
+            "  Units with Mappings     : {}",
+            source_map.units_with_line_program.to_string().bright_white()
+        ));
+
+        let coverage = if source_map.units_processed > 0 {
+            (source_map.units_with_line_program as f64 / source_map.units_processed as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let coverage_str = format!("{:.1}%", coverage);
+        let styled_coverage = if coverage >= 90.0 {
+            coverage_str.green().bold()
+        } else if coverage >= 50.0 {
+            coverage_str.yellow()
+        } else {
+            coverage_str.red().bold()
+        };
+
+        log_both(&format!("  Mapping Coverage        : {}", styled_coverage));
+
         if !source_map.diagnostics.is_empty() {
             log_both("");
-            log_both(&format!("  {}", "⚠ Diagnostics / Warnings:".yellow().bold()));
+            log_both(&format!(
+                "  {}",
+                "⚠ Diagnostics / Warnings:".yellow().bold()
+            ));
             for diag in &source_map.diagnostics {
                 log_both(&format!("    - {}", diag.message.yellow()));
             }
@@ -366,10 +553,12 @@ mod tests {
 
     #[test]
     fn output_functions_pretty_on_metadata_absent_succeeds() {
-        assert!(output_functions(Path::new("test.wasm"), &bare_wasm(), OutputFormat::Pretty).is_ok());
+        assert!(
+            output_functions(Path::new("test.wasm"), &bare_wasm(), OutputFormat::Pretty).is_ok()
+        );
     }
 
-    #[test] 
+    #[test]
     fn function_listing_serializes_to_valid_json() {
         let listing = FunctionListing {
             file: "test.wasm".to_string(),

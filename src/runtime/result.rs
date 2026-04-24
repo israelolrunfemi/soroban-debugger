@@ -1,10 +1,11 @@
-﻿//! Result types and formatting utilities for contract execution.
+//! Result types and formatting utilities for contract execution.
 //!
 //! This module defines the data structures that capture the outcome of a
 //! contract function invocation, including execution traces, storage diffs,
 //! and instruction-level profiling data.
 
 use crate::inspector::budget::BudgetInfo;
+use crate::output::InvocationReason;
 use soroban_env_host::xdr::ScVal;
 use soroban_env_host::{ConversionError, TryFromVal};
 use soroban_sdk::{InvokeError, Val};
@@ -17,6 +18,7 @@ pub use crate::runtime::mocking::MockCallLogEntry as MockCallEntry;
 #[derive(Debug, Clone)]
 pub struct ExecutionRecord {
     pub function: String,
+    pub invocation_reason: InvocationReason,
     pub args: Vec<ScVal>,
     pub result: std::result::Result<ScVal, String>,
     pub budget: BudgetInfo,
@@ -112,16 +114,46 @@ pub(super) fn format_invocation_result(
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum RuntimeError {
+    Timeout { elapsed_ms: u64, limit_ms: u64 },
+    Cancelled { reason: String },
+}
+
+impl std::fmt::Display for RuntimeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RuntimeError::Timeout {
+                elapsed_ms,
+                limit_ms,
+            } => {
+                write!(
+                    f,
+                    "Execution timed out after {}ms (limit: {}ms)",
+                    elapsed_ms, limit_ms
+                )
+            }
+            RuntimeError::Cancelled { reason } => {
+                write!(f, "Execution cancelled: {}", reason)
+            }
+        }
+    }
+}
 
 impl RuntimeError {
     /// Create a timeout error with elapsed and limit durations.
     pub fn timeout(elapsed_ms: u64, limit_ms: u64) -> Self {
-        Self::Timeout { elapsed_ms, limit_ms }
+        Self::Timeout {
+            elapsed_ms,
+            limit_ms,
+        }
     }
 
     /// Create a cancellation error with a reason.
     pub fn cancelled(reason: impl Into<String>) -> Self {
-        Self::Cancelled { reason: reason.into() }
+        Self::Cancelled {
+            reason: reason.into(),
+        }
     }
 
     /// Returns true if this error is a timeout.

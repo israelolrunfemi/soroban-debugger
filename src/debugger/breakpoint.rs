@@ -96,6 +96,7 @@ pub struct BreakpointHit {
 /// Manages breakpoints during debugging
 pub struct BreakpointManager {
     breakpoints: HashMap<String, Breakpoint>,
+    breakpoint_ids: HashMap<String, String>,
 }
 
 impl BreakpointManager {
@@ -103,13 +104,25 @@ impl BreakpointManager {
     pub fn new() -> Self {
         Self {
             breakpoints: HashMap::new(),
+            breakpoint_ids: HashMap::new(),
         }
     }
 
     /// Add or update a breakpoint
     pub fn set(&mut self, breakpoint: Breakpoint) {
-        self.breakpoints
-            .insert(breakpoint.function.clone(), breakpoint);
+        let function = breakpoint.function.clone();
+        let id = breakpoint.id.clone();
+
+        if let Some(existing) = self.breakpoints.get(&function) {
+            self.breakpoint_ids.remove(&existing.id);
+        }
+
+        if let Some(previous_function) = self.breakpoint_ids.get(&id).cloned() {
+            self.breakpoints.remove(&previous_function);
+        }
+
+        self.breakpoint_ids.insert(id, function.clone());
+        self.breakpoints.insert(function, breakpoint);
     }
 
     /// Add a simple breakpoint at a function name (backward compatibility)
@@ -134,7 +147,13 @@ impl BreakpointManager {
 
     /// Remove a breakpoint
     pub fn remove(&mut self, function: &str) -> bool {
-        self.breakpoints.remove(function).is_some()
+        self.remove_breakpoint(function).is_some()
+    }
+
+    fn remove_breakpoint(&mut self, function: &str) -> Option<Breakpoint> {
+        let removed = self.breakpoints.remove(function)?;
+        self.breakpoint_ids.remove(&removed.id);
+        Some(removed)
     }
 
     pub fn remove_function(&mut self, function: &str) -> bool {
@@ -142,11 +161,7 @@ impl BreakpointManager {
     }
 
     pub fn remove_by_id(&mut self, id: &str) -> bool {
-        let key = self
-            .breakpoints
-            .iter()
-            .find_map(|(function, breakpoint)| (breakpoint.id == id).then(|| function.clone()));
-        if let Some(function) = key {
+        if let Some(function) = self.breakpoint_ids.remove(id) {
             self.breakpoints.remove(&function).is_some()
         } else {
             false
@@ -225,8 +240,8 @@ impl BreakpointManager {
     pub fn on_hit(
         &mut self,
         function: &str,
-        _storage: &HashMap<String, String>,
-        _args: Option<&str>,
+        storage: &HashMap<String, String>,
+        args: Option<&str>,
     ) -> crate::Result<Option<BreakpointHit>> {
         let Some(bp) = self.breakpoints.get_mut(function) else {
             return Ok(None);
@@ -240,7 +255,13 @@ impl BreakpointManager {
             }
         }
 
-        let log_messages = bp.log_message.clone().into_iter().collect();
+        let log_messages = bp
+            .log_message
+            .as_deref()
+            .map(|template| interpolate_log_message(template, function, storage, args))
+            .transpose()?
+            .into_iter()
+            .collect();
         Ok(Some(BreakpointHit {
             should_pause: !bp.is_log_point(),
             log_messages,
@@ -250,6 +271,7 @@ impl BreakpointManager {
     /// Clear all breakpoints
     pub fn clear(&mut self) {
         self.breakpoints.clear();
+        self.breakpoint_ids.clear();
     }
 
     /// Check if there are any breakpoints set
@@ -262,8 +284,8 @@ impl BreakpointManager {
         self.breakpoints.len()
     }
 
-    /// Parse a condition string into a validated Condition
-    /// This validates syntax but doesn't evaluate it
+    /// Parse a condition string into a validated condition expression.
+    /// This validates syntax but does not evaluate it.
     pub fn parse_condition(s: &str) -> crate::Result<String> {
         let s = s.trim();
         if s.is_empty() {
@@ -273,7 +295,6 @@ impl BreakpointManager {
             .into());
         }
 
-        // Basic syntax validation - check for supported operators
         if !contains_comparison_operator(s) {
             return Err(crate::DebuggerError::BreakpointError(format!(
                 "Invalid condition '{}': must contain a comparison operator (==, !=, <, >, <=, >=)",
@@ -282,7 +303,21 @@ impl BreakpointManager {
             .into());
         }
 
-        // Additional validation could be added here
+        let Some((op, pos)) = find_operator(s) else {
+            return Err(crate::DebuggerError::BreakpointError(
+                "Condition must contain a comparison operator".to_string(),
+            )
+            .into());
+        };
+        let lhs = s[..pos].trim();
+        let rhs = s[pos + op.len()..].trim();
+        if lhs.is_empty() || rhs.is_empty() {
+            return Err(crate::DebuggerError::BreakpointError(
+                "Condition must include non-empty left and right operands".to_string(),
+            )
+            .into());
+        }
+
         Ok(s.to_string())
     }
 
@@ -296,7 +331,6 @@ impl BreakpointManager {
             .into());
         }
 
-        // Validate hit condition format
         if !is_valid_hit_condition(s) {
             return Err(crate::DebuggerError::BreakpointError(format!(
                 "Invalid hit condition '{}': must be number, >N, >=N, ==N, <N, <=N, or %N==0",
@@ -317,6 +351,29 @@ pub trait ConditionEvaluator {
 
     /// Interpolate variables in a log message (e.g., "Balance is {balance}")
     fn interpolate_log(&self, template: &str) -> crate::Result<String>;
+}
+
+fn interpolate_log_message(
+    template: &str,
+    function: &str,
+    storage: &HashMap<String, String>,
+    args: Option<&str>,
+) -> crate::Result<String> {
+    let mut result = template.to_string();
+
+    for (name, value) in storage {
+        let placeholder = format!("{{{}}}", name);
+        result = result.replace(&placeholder, value);
+    }
+
+    result = result.replace("{function}", function);
+
+    if let Some(args) = args {
+        result = result.replace("{args}", args);
+        result = result.replace("{arguments}", args);
+    }
+
+    Ok(result)
 }
 
 /// Evaluate a hit condition against the current hit count
@@ -415,6 +472,12 @@ fn evaluate_hit_condition(hit_condition: &str, hit_count: usize) -> crate::Resul
     .into())
 }
 
+fn find_operator(s: &str) -> Option<(&'static str, usize)> {
+    [">=", "<=", "==", "!=", ">", "<"]
+        .into_iter()
+        .find_map(|op| s.find(op).map(|pos| (op, pos)))
+}
+
 /// Check if a string contains a comparison operator
 fn contains_comparison_operator(s: &str) -> bool {
     s.contains(">=")
@@ -457,6 +520,7 @@ impl Default for BreakpointManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     // Mock evaluator for testing
     struct MockEvaluator {
@@ -680,6 +744,50 @@ mod tests {
     }
 
     #[test]
+    fn test_on_hit_interpolates_log_message() {
+        let mut manager = BreakpointManager::new();
+        manager.set(Breakpoint::log_point(
+            "transfer".to_string(),
+            "Transfer {amount} - Balance: {balance}".to_string(),
+        ));
+
+        let storage = HashMap::from([
+            ("amount".to_string(), "100".to_string()),
+            ("balance".to_string(), "1500".to_string()),
+        ]);
+
+        let hit = manager
+            .on_hit("transfer", &storage, Some("[100]"))
+            .unwrap()
+            .unwrap();
+
+        assert!(!hit.should_pause);
+        assert_eq!(
+            hit.log_messages,
+            vec!["Transfer 100 - Balance: 1500".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_on_hit_interpolates_builtin_placeholders() {
+        let mut manager = BreakpointManager::new();
+        manager.set(Breakpoint::log_point(
+            "transfer".to_string(),
+            "Function {function} args {args} arguments {arguments}".to_string(),
+        ));
+
+        let hit = manager
+            .on_hit("transfer", &HashMap::new(), Some("[1,2]"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            hit.log_messages,
+            vec!["Function transfer args [1,2] arguments [1,2]".to_string()]
+        );
+    }
+
+    #[test]
     fn test_combined_conditions() {
         let mut manager = BreakpointManager::new();
         let mut evaluator = MockEvaluator::new();
@@ -720,6 +828,45 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_breakpoint_by_id() {
+        let mut manager = BreakpointManager::new();
+        manager.add_spec(BreakpointSpec {
+            id: "bp-1".to_string(),
+            function: "transfer".to_string(),
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+        });
+
+        assert!(manager.remove_by_id("bp-1"));
+        assert!(!manager.should_break("transfer"));
+        assert!(!manager.remove_by_id("bp-1"));
+    }
+
+    #[test]
+    fn test_set_replaces_stale_id_index_for_same_function() {
+        let mut manager = BreakpointManager::new();
+        manager.add_spec(BreakpointSpec {
+            id: "bp-1".to_string(),
+            function: "transfer".to_string(),
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+        });
+        manager.add_spec(BreakpointSpec {
+            id: "bp-2".to_string(),
+            function: "transfer".to_string(),
+            condition: None,
+            hit_condition: None,
+            log_message: None,
+        });
+
+        assert!(!manager.remove_by_id("bp-1"));
+        assert!(manager.remove_by_id("bp-2"));
+        assert!(!manager.should_break("transfer"));
+    }
+
+    #[test]
     fn test_list_breakpoints() {
         let mut manager = BreakpointManager::new();
         manager.add("transfer");
@@ -728,6 +875,36 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list.contains(&"transfer".to_string()));
         assert!(list.contains(&"mint".to_string()));
+    }
+
+    #[test]
+    fn test_parse_condition_missing_operator_fails() {
+        let result = BreakpointManager::parse_condition("balance 1000");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("comparison operator"));
+    }
+
+    #[test]
+    fn test_parse_condition_missing_lhs_fails() {
+        let result = BreakpointManager::parse_condition("> 1000");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("left and right operands"));
+    }
+
+    #[test]
+    fn test_parse_condition_missing_rhs_fails() {
+        let result = BreakpointManager::parse_condition("balance > ");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("left and right operands"));
     }
 
     #[test]

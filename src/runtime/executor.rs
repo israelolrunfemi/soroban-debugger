@@ -1,4 +1,4 @@
-﻿//! Soroban contract executor â€” public faÃ§ade for the runtime sub-modules.
+//! Soroban contract executor â€” public faÃ§ade for the runtime sub-modules.
 //!
 //! [`ContractExecutor`] is the main entry-point for all contract execution.
 //! Internally it delegates to four focused sub-modules:
@@ -9,20 +9,25 @@
 //! - [`super::result`]  â€” Result types and formatting helpers.
 
 use crate::inspector::budget::MemorySummary;
+use crate::output::InvocationReason;
 use crate::runtime::env::DebugEnv;
 use crate::runtime::mocking::{MockCallLogEntry, MockContractDispatcher, MockRegistry};
 use crate::server::protocol::{DynamicTraceEvent, DynamicTraceEventKind};
 use crate::utils::arguments::ArgumentParser;
 use crate::{DebuggerError, Result};
 
+use serde_json::{json, Value};
 use soroban_env_host::Host;
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::testutils::Ledger as _;
-use soroban_sdk::{Address, Env};
+use soroban_sdk::{Address, Env, Val};
 use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::sync::{Arc, Mutex};
-use tracing::info;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use tracing::{info, warn};
 
 // â”€â”€ re-exports so callers never need to import sub-modules directly â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 pub use crate::runtime::mocking::MockCallLogEntry as MockCallEntry;
@@ -66,6 +71,10 @@ impl ContractExecutor {
 
     pub fn env(&self) -> &Env {
         &self.env
+    }
+
+    pub fn contract_address(&self) -> &Address {
+        &self.contract_address
     }
 
     pub fn set_timeout(&mut self, secs: u64) {
@@ -119,7 +128,8 @@ impl ContractExecutor {
         // Track function call entry
         let contract_addr_str = format!("{:?}", self.contract_address);
         let arg_strings: Vec<String> = parsed_args.iter().map(|val| format!("{:?}", val)).collect();
-        self.debug_env.enter_function(&contract_addr_str, function);
+        self.debug_env
+            .enter_function(&contract_addr_str, function, InvocationReason::Entrypoint);
 
         // 3. Invoke and capture the result.
         let storage_fn = || self.get_storage_snapshot();
@@ -130,8 +140,11 @@ impl ContractExecutor {
             &self.env,
             &self.contract_address,
             &self.error_db,
-            function,
-            parsed_args,
+            crate::runtime::invoker::InvokeArgs {
+                function,
+                args: parsed_args,
+                reason: InvocationReason::Entrypoint,
+            },
             self.timeout_secs,
             storage_fn,
         )?;
@@ -146,6 +159,7 @@ impl ContractExecutor {
         self.debug_env.record_function_call(
             &contract_addr_str,
             function,
+            InvocationReason::Entrypoint,
             arg_strings,
             Some(result_str),
             None::<&str>,
@@ -430,7 +444,7 @@ impl ContractExecutor {
             .iter()
             .map(|(name, &cpu)| (name.clone(), cpu))
             .collect();
-        function_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        function_counts.sort_by_key(|b| std::cmp::Reverse(b.1));
         let total = function_counts.iter().map(|(_, c)| c).sum();
         Ok(InstructionCounts {
             function_counts,
@@ -509,60 +523,73 @@ impl ContractExecutor {
             .collect())
     }
 
-    /// Build a structured dynamic trace for security analysis.
-    pub fn get_dynamic_trace(&self) -> Result<Vec<DynamicTraceEvent>> {
-        let mut out = Vec::new();
+    #[allow(dead_code)]
+    fn parse_args(&self, function: &str, args_json: &str) -> Result<Vec<Val>> {
+        let normalized_args_json = self
+            .normalize_args_for_function_signature(function, args_json)
+            .unwrap_or_else(|| args_json.to_string());
 
-        for access in self.debug_env.storage_accesses() {
-            let (kind, value) = match access.access_type {
-                crate::runtime::env::StorageAccessType::Read => {
-                    (DynamicTraceEventKind::StorageRead, None)
-                }
-                crate::runtime::env::StorageAccessType::Write => {
-                    (DynamicTraceEventKind::StorageWrite, access.value.clone())
-                }
+        let parser = ArgumentParser::new(self.env.clone());
+
+        parser
+            .parse_args_string(&normalized_args_json)
+            .map_err(|e| {
+                warn!("Failed to parse arguments: {}", e);
+                DebuggerError::InvalidArguments(e.to_string()).into()
+            })
+    }
+
+    #[allow(dead_code)]
+    fn normalize_args_for_function_signature(
+        &self,
+        function: &str,
+        args_json: &str,
+    ) -> Option<String> {
+        let signatures = crate::utils::wasm::parse_function_signatures(&self.wasm_bytes).ok()?;
+        let signature = signatures.into_iter().find(|s| s.name == function)?;
+
+        let Value::Array(mut args) = serde_json::from_str::<Value>(args_json).ok()? else {
+            return None;
+        };
+
+        for (idx, arg) in args.iter_mut().enumerate() {
+            let Some(param) = signature.params.get(idx) else {
+                break;
             };
 
-            out.push(DynamicTraceEvent {
-                sequence: access.sequence,
-                kind,
-                message: format!("storage:{}:{}", access.sequence, access.key),
-                caller: None,
-                function: None,
-                call_depth: Some(0),
-                storage_key: Some(access.key.clone()),
-                storage_value: value,
-                address: None,
-            });
+            if param.type_name.starts_with("Option<") {
+                let original = arg.clone();
+                *arg = json!({ "type": "option", "value": original });
+            } else if param.type_name.starts_with("Tuple<") {
+                let original = arg.clone();
+                let arity = tuple_arity_from_type_name(&param.type_name)?;
+                *arg = json!({ "type": "tuple", "arity": arity, "value": original });
+            }
         }
 
-        for call in self.debug_env.function_calls() {
-            out.push(DynamicTraceEvent {
-                sequence: call.sequence,
-                kind: DynamicTraceEventKind::FunctionCall,
-                message: format!("{} -> {}", call.caller, call.callee),
-                caller: Some(call.caller.clone()),
-                function: Some(call.callee.clone()),
-                call_depth: Some(call.depth as u64),
-                storage_key: None,
-                storage_value: None,
-                address: None,
-            });
-        }
+        serde_json::to_string(&args).ok()
+    }
 
+    /// Build a structured dynamic trace for security analysis.
+    pub fn get_dynamic_trace(&self) -> Result<Vec<DynamicTraceEvent>> {
+        let mut out = self.debug_env.dynamic_events().to_vec();
+
+        // Add additional diagnostic events from the host that weren't captured by hooks.
         let mut next_sequence = out.iter().map(|e| e.sequence).max().map_or(0, |n| n + 1);
         for event in self.get_diagnostic_events().unwrap_or_default() {
             let message = format!("{:?}", event);
+            if out
+                .iter()
+                .any(|e| e.message.contains(&message) || message.contains(&e.message))
+            {
+                continue;
+            }
+
             out.push(DynamicTraceEvent {
                 sequence: next_sequence,
                 kind: classify_diagnostic_event_kind(&message),
                 message,
-                caller: None,
-                function: None,
-                call_depth: Some(0),
-                storage_key: None,
-                storage_value: None,
-                address: None,
+                ..Default::default()
             });
             next_sequence += 1;
         }
@@ -571,7 +598,7 @@ impl ContractExecutor {
         Ok(out)
     }
 
-    // â”€â”€ private helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Private helpers.
 
     fn install_mock_dispatchers(&self) -> Result<()> {
         let ids = self
@@ -609,31 +636,97 @@ impl ContractExecutor {
     }
 }
 
+/// Token for cooperative execution cancellation (issue #504).
+#[derive(Debug, Clone)]
+pub struct CancellationToken {
+    inner: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.inner.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.load(Ordering::SeqCst)
+    }
+}
+
+fn tuple_arity_from_type_name(type_name: &str) -> Option<usize> {
+    if !type_name.starts_with("Tuple<") || !type_name.ends_with('>') {
+        return None;
+    }
+
+    let inner = type_name.strip_prefix("Tuple<")?.strip_suffix('>')?;
+    if inner.trim().is_empty() {
+        return Some(0);
+    }
+
+    let mut count = 1usize;
+    let mut depth = 0usize;
+    for ch in inner.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => count += 1,
+            _ => {}
+        }
+    }
+    Some(count)
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 struct ExecutionTimeoutWatchdog {
     done_tx: Option<std::sync::mpsc::Sender<()>>,
+    cancellation_token: CancellationToken,
 }
 
 impl ExecutionTimeoutWatchdog {
     fn start(timeout_secs: u64) -> Self {
         if timeout_secs == 0 {
-            return Self { done_tx: None };
+            return Self {
+                done_tx: None,
+                cancellation_token: CancellationToken::new(),
+            };
         }
 
         let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let cancel_token = CancellationToken::new();
+        let token_clone = cancel_token.clone();
+
         std::thread::spawn(move || {
             match rx.recv_timeout(std::time::Duration::from_secs(timeout_secs)) {
                 Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    eprintln!(
-                    "Execution timed out after {} seconds. Aborting with exit code 124. Use --timeout to adjust.",
-                    timeout_secs
-                );
-                    std::process::exit(124);
+                    tracing::warn!(
+                        "Execution timeout after {} seconds. Initiating cooperative cancellation.",
+                        timeout_secs
+                    );
+                    token_clone.cancel();
                 }
             }
         });
 
-        Self { done_tx: Some(tx) }
+        Self {
+            done_tx: Some(tx),
+            cancellation_token: cancel_token,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn token(&self) -> CancellationToken {
+        self.cancellation_token.clone()
     }
 }
 
@@ -675,6 +768,7 @@ fn classify_diagnostic_event_kind(message: &str) -> DynamicTraceEventKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn test_debug_env_storage_tracking() {
@@ -690,13 +784,45 @@ mod tests {
     }
 
     #[test]
+    fn parses_tuple_arity_for_simple_tuple() {
+        assert_eq!(tuple_arity_from_type_name("Tuple<U32, Symbol>"), Some(2));
+    }
+
+    #[test]
+    fn parses_tuple_arity_for_nested_tuple_types() {
+        assert_eq!(
+            tuple_arity_from_type_name("Tuple<Option<U32>, Tuple<I32, Symbol>, Vec<Bool>>"),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn rejects_non_tuple_type_name() {
+        assert_eq!(tuple_arity_from_type_name("Option<U32>"), None);
+    }
+
+    #[test]
+    fn tuple_arity_counts_top_level_types() {
+        assert_eq!(tuple_arity_from_type_name("Tuple<U32, Symbol>"), Some(2));
+        assert_eq!(
+            tuple_arity_from_type_name("Tuple<U32, Option<Vec<Symbol>>, Map<U32, String>>"),
+            Some(3)
+        );
+    }
+
+    #[test]
     fn test_debug_env_function_call_tracking() {
         let mut debug_env = DebugEnv::new();
 
-        debug_env.enter_function("contract", "transfer");
+        debug_env.enter_function(
+            "contract",
+            "transfer",
+            crate::output::InvocationReason::Entrypoint,
+        );
         debug_env.record_function_call(
             "contract",
             "transfer",
+            crate::output::InvocationReason::Entrypoint,
             vec!["alice".to_string(), "bob".to_string(), "100".to_string()],
             Some("success"),
             None::<&str>,
@@ -714,11 +840,20 @@ mod tests {
         let mut debug_env = DebugEnv::new();
 
         // Simulate nested call: transfer -> mint
-        debug_env.enter_function("contract", "transfer");
-        debug_env.enter_function("transfer", "mint");
+        debug_env.enter_function(
+            "contract",
+            "transfer",
+            crate::output::InvocationReason::Entrypoint,
+        );
+        debug_env.enter_function(
+            "transfer",
+            "mint",
+            crate::output::InvocationReason::CrossContract,
+        );
         debug_env.record_function_call(
             "transfer",
             "mint",
+            crate::output::InvocationReason::CrossContract,
             vec!["100".to_string()],
             Some("ok"),
             None::<&str>,
@@ -728,6 +863,7 @@ mod tests {
         debug_env.record_function_call(
             "contract",
             "transfer",
+            crate::output::InvocationReason::Entrypoint,
             vec![],
             Some("complete"),
             None::<&str>,

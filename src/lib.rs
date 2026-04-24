@@ -92,6 +92,13 @@ pub enum DebuggerError {
     )]
     FileError(String),
 
+    #[error("I/O operation failed: {0}")]
+    #[diagnostic(
+         code(debugger::io_error),
+         help("Action: Ensure the terminal or stream is available and writable.\nContext: An error occurred during standard input or output operations.")
+     )]
+    IoError(String),
+
     #[error("Network/transport error: {0}")]
     #[diagnostic(
         code(debugger::network_error),

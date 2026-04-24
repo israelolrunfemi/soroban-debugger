@@ -1,13 +1,16 @@
 use crate::debugger::breakpoint::{BreakpointManager, BreakpointSpec};
+use crate::debugger::breakpoint::{BreakpointManager, ConditionEvaluator};
 use crate::debugger::instruction_pointer::StepMode;
 use crate::debugger::source_map::{SourceLocation, SourceMap};
 use crate::debugger::state::DebugState;
 use crate::debugger::stepper::Stepper;
+use crate::output::InvocationReason;
 use crate::plugin::{EventContext, ExecutionEvent};
 use crate::runtime::executor::ContractExecutor;
 use crate::runtime::instruction::Instruction;
 use crate::runtime::instrumentation::Instrumenter;
 use crate::Result;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::info;
 
@@ -26,6 +29,98 @@ pub struct DebuggerEngine {
     source_map: Option<SourceMap>,
     paused: bool,
     instruction_debug_enabled: bool,
+}
+
+struct EngineConditionEvaluator {
+    storage: HashMap<String, String>,
+}
+
+impl EngineConditionEvaluator {
+    fn new(storage: HashMap<String, String>) -> Self {
+        Self { storage }
+    }
+
+    fn parse_condition<'a>(
+        &self,
+        condition: &'a str,
+    ) -> crate::Result<(&'a str, &'a str, &'a str)> {
+        let condition = condition.trim();
+        let (var, op, value) = if let Some(pos) = condition.find(">=") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), ">=", rest[2..].trim())
+        } else if let Some(pos) = condition.find("<=") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "<=", rest[2..].trim())
+        } else if let Some(pos) = condition.find("==") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "==", rest[2..].trim())
+        } else if let Some(pos) = condition.find("!=") {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "!=", rest[2..].trim())
+        } else if let Some(pos) = condition.find('>') {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), ">", rest[1..].trim())
+        } else if let Some(pos) = condition.find('<') {
+            let (var, rest) = condition.split_at(pos);
+            (var.trim(), "<", rest[1..].trim())
+        } else {
+            return Err(crate::DebuggerError::BreakpointError(format!(
+                "No operator found in condition: {}",
+                condition
+            ))
+            .into());
+        };
+
+        Ok((var, op, value))
+    }
+
+    fn normalize_value(value: &str) -> &str {
+        value.trim_matches('"').trim_matches('\'')
+    }
+}
+
+impl ConditionEvaluator for EngineConditionEvaluator {
+    fn evaluate(&self, condition: &str) -> crate::Result<bool> {
+        let (var, op, value_str) = self.parse_condition(condition)?;
+        let actual = self
+            .storage
+            .get(var)
+            .map(String::as_str)
+            .unwrap_or_default()
+            .trim();
+        let actual = Self::normalize_value(actual);
+        let expected = Self::normalize_value(value_str);
+
+        if let (Ok(lhs), Ok(rhs)) = (actual.parse::<f64>(), expected.parse::<f64>()) {
+            return Ok(match op {
+                "==" => lhs == rhs,
+                "!=" => lhs != rhs,
+                ">" => lhs > rhs,
+                "<" => lhs < rhs,
+                ">=" => lhs >= rhs,
+                "<=" => lhs <= rhs,
+                _ => false,
+            });
+        }
+
+        Ok(match op {
+            "==" => actual == expected,
+            "!=" => actual != expected,
+            ">" => actual > expected,
+            "<" => actual < expected,
+            ">=" => actual >= expected,
+            "<=" => actual <= expected,
+            _ => false,
+        })
+    }
+
+    fn interpolate_log(&self, template: &str) -> crate::Result<String> {
+        let mut rendered = template.to_string();
+        for (key, value) in &self.storage {
+            rendered = rendered.replace(&format!("{{{}}}", key), value);
+        }
+        Ok(rendered)
+    }
 }
 
 impl DebuggerEngine {
@@ -85,7 +180,8 @@ impl DebuggerEngine {
             Ok(()) => {
                 self.source_map = Some(source_map);
             }
-            Err(_) => {
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to load source map");
                 self.source_map = None;
             }
         }
@@ -170,7 +266,11 @@ impl DebuggerEngine {
         self.paused = false;
 
         if let Ok(mut state) = self.state.lock() {
-            state.set_current_function(function.to_string(), args.map(str::to_string));
+            state.set_current_function(
+                function.to_string(),
+                args.map(str::to_string),
+                Some(InvocationReason::Entrypoint),
+            );
             state.call_stack_mut().clear();
             state.call_stack_mut().push(function.to_string(), None);
         }
@@ -189,12 +289,6 @@ impl DebuggerEngine {
             },
             &mut plugin_ctx,
         );
-
-        let (step_count, current_args) = self
-            .state
-            .lock()
-            .map(|s| (s.step_count(), s.current_args().map(String::from)))
-            .unwrap_or((0, None));
 
         if check_breakpoints {
             let evaluator = self.create_condition_evaluator();
@@ -216,6 +310,22 @@ impl DebuggerEngine {
                 Err(e) => {
                     tracing::warn!("Breakpoint evaluation failed: {}", e);
                 }
+            let storage = self.executor.get_storage_snapshot().unwrap_or_default();
+            let evaluator = EngineConditionEvaluator::new(storage);
+            let (should_pause, log_output) = self
+                .breakpoints_mut()
+                .should_break_with_context(function, &evaluator)?;
+
+            if let Some(message) = log_output {
+                println!("{message}");
+            }
+
+            if should_pause {
+                let condition = self
+                    .breakpoints()
+                    .get_breakpoint(function)
+                    .and_then(|bp| bp.condition.clone());
+                self.pause_at_function(function, condition);
             }
         }
 
@@ -254,7 +364,11 @@ impl DebuggerEngine {
 
     pub fn prepare_breakpoint_stop(&mut self, function: &str, args: Option<&str>) {
         if let Ok(mut state) = self.state.lock() {
-            state.set_current_function(function.to_string(), args.map(str::to_string));
+            state.set_current_function(
+                function.to_string(),
+                args.map(str::to_string),
+                Some(InvocationReason::Entrypoint),
+            );
             state.call_stack_mut().clear();
             state.call_stack_mut().push(function.to_string(), None);
         }
@@ -289,7 +403,11 @@ impl DebuggerEngine {
     /// emitting a breakpoint log event.
     pub fn stage_execution(&mut self, function: &str, args: Option<&str>) {
         if let Ok(mut state) = self.state.lock() {
-            state.set_current_function(function.to_string(), args.map(str::to_string));
+            state.set_current_function(
+                function.to_string(),
+                args.map(str::to_string),
+                Some(InvocationReason::Entrypoint),
+            );
             state.call_stack_mut().clear();
             state.call_stack_mut().push(function.to_string(), None);
         }
@@ -312,16 +430,17 @@ impl DebuggerEngine {
             stack.push(current_func, None);
 
             for event in events {
-                let event_str = format!("{:?}", event);
-                if event_str.contains("ContractCall")
-                    || (event_str.contains("call") && event.contract_id.is_some())
-                {
-                    let contract_id = event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
-                    stack.push("nested_call".to_string(), contract_id);
-                } else if (event_str.contains("ContractReturn") || event_str.contains("return"))
-                    && stack.get_stack().len() > 1
-                {
-                    stack.pop();
+                // Check if this is a diagnostic event by examining the event topics
+                if let Some(first_topic) = self.get_first_event_topic(&event) {
+                    if first_topic == "fn_call" {
+                        // This is a cross-contract call
+                        let contract_id =
+                            event.contract_id.as_ref().map(|cid| format!("{:?}", cid));
+                        stack.push("nested_call".to_string(), contract_id);
+                    } else if first_topic == "fn_return" && stack.get_stack().len() > 1 {
+                        // This is a return from a cross-contract call
+                        stack.pop();
+                    }
                 }
             }
 
@@ -332,6 +451,32 @@ impl DebuggerEngine {
         }
 
         Ok(())
+    }
+
+    /// Extract the first topic from a ContractEvent as a string, if available
+    fn get_first_event_topic(
+        &self,
+        event: &soroban_env_host::xdr::ContractEvent,
+    ) -> Option<String> {
+        match &event.body {
+            soroban_env_host::xdr::ContractEventBody::V0(v0) => {
+                if let Some(first_topic) = v0.topics.first() {
+                    // Check if the topic is a Symbol and extract its value
+                    match first_topic {
+                        soroban_env_host::xdr::ScVal::Symbol(sym) => {
+                            // Convert the symbol bytes to a string
+                            String::from_utf8(sym.0.to_vec()).ok()
+                        }
+                        _ => {
+                            // For non-symbol topics, fall back to debug format
+                            Some(format!("{:?}", first_topic))
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+        }
     }
 
     /// Step into next instruction.
@@ -357,6 +502,21 @@ impl DebuggerEngine {
 
         let stepped = if let Ok(mut state) = self.state.lock() {
             self.stepper.step_over(&mut state)
+        } else {
+            false
+        };
+        self.paused = stepped;
+        Ok(stepped)
+    }
+
+    /// Step to the next basic block boundary.
+    pub fn step_block(&mut self) -> Result<bool> {
+        if !self.instruction_debug_enabled {
+            return Err(miette::miette!("Instruction debugging not enabled"));
+        }
+
+        let stepped = if let Ok(mut state) = self.state.lock() {
+            self.stepper.step_block(&mut state)
         } else {
             false
         };
@@ -400,22 +560,7 @@ impl DebuggerEngine {
         Ok(stepped)
     }
 
-    /// Step to next basic block.
-    pub fn step_block(&mut self) -> Result<bool> {
-        if !self.instruction_debug_enabled {
-            return Err(miette::miette!("Instruction debugging not enabled"));
-        }
-
-        let stepped = if let Ok(mut state) = self.state.lock() {
-            self.stepper.step_block(&mut state)
-        } else {
-            false
-        };
-        self.paused = stepped;
-        Ok(stepped)
-    }
-
-    /// Step backwards to previous instruction.
+    /// Step back to previous instruction.
     pub fn step_back(&mut self) -> Result<bool> {
         if !self.instruction_debug_enabled {
             return Err(miette::miette!("Instruction debugging not enabled"));
@@ -465,7 +610,11 @@ impl DebuggerEngine {
         self.paused = true;
 
         if let Ok(mut state) = self.state.lock() {
-            state.set_current_function(function.to_string(), None);
+            state.set_current_function(
+                function.to_string(),
+                None,
+                Some(InvocationReason::Entrypoint),
+            );
             state.call_stack().display();
         }
 
@@ -585,3 +734,7 @@ impl crate::debugger::breakpoint::ConditionEvaluator for DebugStateEvaluator {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "engine_test.rs"]
+mod engine_test;
