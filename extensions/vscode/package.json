@@ -91,6 +91,11 @@
           "type": "boolean",
           "default": false,
           "description": "Enable opt-in telemetry for launch failures, handshake errors, and adapter crashes. No contract data or secrets are collected."
+        },
+        "soroban-debugger.preflight.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically run preflight diagnostics before launching a debug session."
         }
       }
     },
