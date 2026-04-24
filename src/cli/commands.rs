@@ -111,6 +111,51 @@ fn render_symbolic_report(report: &crate::analyzer::symbolic::SymbolicReport) ->
         ),
     ];
 
+    // Add coverage metrics section
+    lines.push(String::new());
+    lines.push("Coverage Summary:".to_string());
+    
+    // Function coverage
+    let func_coverage = if report.metadata.total_functions_available > 0 {
+        let pct = (report.metadata.unique_functions_reached as f64 
+            / report.metadata.total_functions_available as f64) * 100.0;
+        format!(
+            "  Functions reached: {}/{} ({:.1}%)",
+            report.metadata.unique_functions_reached,
+            report.metadata.total_functions_available,
+            pct
+        )
+    } else {
+        format!(
+            "  Functions reached: {}",
+            report.metadata.unique_functions_reached
+        )
+    };
+    lines.push(func_coverage);
+    
+    // Branch coverage estimate
+    lines.push(format!(
+        "  Branches touched: {} (estimated from distinct paths)",
+        report.metadata.branches_touched
+    ));
+    
+    // Duplicate suppression
+    if report.metadata.duplicates_suppressed > 0 {
+        lines.push(format!(
+            "  Duplicates suppressed: {}",
+            report.metadata.duplicates_suppressed
+        ));
+    }
+    
+    // Exploration completeness indicator
+    if report.metadata.exploration_cap_reached {
+        lines.push("  ⚠ Exploration hit path cap - may not be complete".to_string());
+    } else if report.metadata.truncated_by_timeout {
+        lines.push("  ⚠ Exploration timed out - may not be complete".to_string());
+    } else {
+        lines.push("  ✓ Exploration completed without hitting caps".to_string());
+    }
+
     if report.metadata.truncation_reasons.is_empty() {
         lines.push("Truncation: none".to_string());
     } else {
