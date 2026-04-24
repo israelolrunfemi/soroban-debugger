@@ -338,33 +338,19 @@ impl SymbolicAnalyzer {
             };
 
             match executor_res {
-                Ok(Ok(val)) => {
-                    // Track the target function as reached
-                    reached_functions.insert(function.to_string());
-                    Self::record_outcome(&mut report, &mut seen_inputs, args_json, Ok(val));
-                }
-                Ok(Err(err)) => {
-                    // Track the target function as reached
-                    reached_functions.insert(function.to_string());
                 Ok(val) => {
+                    // Track the target function as reached
+                    reached_functions.insert(function.to_string());
                     Self::record_outcome(&mut report, &mut seen_inputs, args_json, Ok(val), trace);
                 }
                 Err(err) => {
+                    // Track the target function as reached
+                    reached_functions.insert(function.to_string());
                     Self::record_outcome(
                         &mut report,
                         &mut seen_inputs,
                         args_json,
                         Err(err.to_string()),
-                    );
-                }
-                Err(_) => {
-                    // Track the target function as reached
-                    reached_functions.insert(function.to_string());
-                    Self::record_outcome(
-                        &mut report,
-                        &mut seen_inputs,
-                        args_json,
-                        Err("Host Panic".to_string()),
                         trace,
                     );
                 }
