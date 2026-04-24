@@ -13,6 +13,7 @@
 
 #![allow(deprecated)]
 
+#[cfg(feature = "network-tests")]
 mod network;
 
 use assert_cmd::Command;
@@ -110,7 +111,7 @@ fn parity_cli_storage_import_export_flags_exist() {
 }
 
 /// SURFACE: CLI only
-/// The `server` subcommand must expose --port, --token, --tls-cert, --tls-key.
+/// The `server` subcommand must expose --host, --port, --token, --tls-cert, --tls-key.
 /// TLS flags in particular have no launch.json equivalent.
 #[test]
 fn parity_cli_server_command_flags_exist() {
@@ -118,6 +119,7 @@ fn parity_cli_server_command_flags_exist() {
         .args(["server", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("--host"))
         .stdout(predicate::str::contains("--port"))
         .stdout(predicate::str::contains("--token"))
         .stdout(predicate::str::contains("--tls-cert"))
@@ -282,9 +284,13 @@ fn parity_shared_function_breakpoint_accepted() {
 /// This validates the shared auth handshake that the extension relies on via
 /// the `token` field in launch.json.
 #[test]
+#[cfg(feature = "network-tests")]
 fn parity_dap_server_starts_and_accepts_connection() {
     if !network::can_bind_loopback() {
-        eprintln!("Skipping parity_dap_server_starts_and_accepts_connection: loopback restricted");
+        eprintln!(
+            "Skipping parity_dap_server_starts_and_accepts_connection: loopback networking \
+             restricted (EPERM or equivalent) – see docs/remote-troubleshooting.md."
+        );
         return;
     }
 
@@ -292,11 +298,19 @@ fn parity_dap_server_starts_and_accepts_connection() {
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let port = 19_230u16;
+    let port = network::allocate_ephemeral_port().expect("Failed to allocate ephemeral port");
     let token = "parity-test-token-ok";
 
     let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
-        .args(["server", "--port", &port.to_string(), "--token", token])
+        .args([
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--token",
+            token,
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -340,9 +354,10 @@ fn parity_dap_server_starts_and_accepts_connection() {
             );
         }
         Err(e) => {
-            // Skip if the server could not start (port in use, env issue, etc.)
+            // Skip if the server could not start (port in use, EPERM, env issue, etc.)
             eprintln!(
-                "Skipping parity_dap_server_starts_and_accepts_connection: {}",
+                "Skipping parity_dap_server_starts_and_accepts_connection: {} – \
+                 see docs/remote-troubleshooting.md.",
                 e
             );
         }
@@ -353,9 +368,13 @@ fn parity_dap_server_starts_and_accepts_connection() {
 /// The server must reject an incorrect token. This confirms the auth layer
 /// that the extension depends on when `token` is set in launch.json.
 #[test]
+#[cfg(feature = "network-tests")]
 fn parity_dap_server_rejects_invalid_token() {
     if !network::can_bind_loopback() {
-        eprintln!("Skipping parity_dap_server_rejects_invalid_token: loopback restricted");
+        eprintln!(
+            "Skipping parity_dap_server_rejects_invalid_token: loopback networking \
+             restricted (EPERM or equivalent) – see docs/remote-troubleshooting.md."
+        );
         return;
     }
 
@@ -363,12 +382,20 @@ fn parity_dap_server_rejects_invalid_token() {
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let port = 19_231u16;
+    let port = network::allocate_ephemeral_port().expect("Failed to allocate ephemeral port");
     let real_token = "real-parity-token";
     let wrong_token = "wrong-parity-token";
 
     let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
-        .args(["server", "--port", &port.to_string(), "--token", real_token])
+        .args([
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--token",
+            real_token,
+        ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
@@ -412,7 +439,103 @@ fn parity_dap_server_rejects_invalid_token() {
             );
         }
         Err(e) => {
-            eprintln!("Skipping parity_dap_server_rejects_invalid_token: {}", e);
+            eprintln!(
+                "Skipping parity_dap_server_rejects_invalid_token: {} – \
+                 see docs/remote-troubleshooting.md.",
+                e
+            );
+        }
+    }
+}
+
+/// SURFACE: DAP (server path) — BACKWARD COMPATIBILITY GUARD
+///
+/// Older clients send `Authenticate` as their very first message, before any
+/// `Handshake` exchange. The server MUST accept and honour this ordering so
+/// that pre-handshake clients continue to work without modification.
+///
+/// This test is the dedicated regression guard for that behaviour. If it
+/// starts failing it means the auth-before-handshake path in
+/// `src/server/debug_server.rs` (`handle_single_connection`) was broken.
+/// Do NOT remove or weaken this test without a corresponding protocol version
+/// bump and a migration note in CONTRIBUTING.md.
+#[test]
+#[cfg(feature = "network-tests")]
+fn parity_dap_auth_before_handshake_is_accepted() {
+    if !network::can_bind_loopback() {
+        eprintln!(
+            "Skipping parity_dap_auth_before_handshake_is_accepted: loopback networking \
+             restricted (EPERM or equivalent) – see docs/remote-troubleshooting.md."
+        );
+        return;
+    }
+
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let port = 19_235u16;
+    let token = "compat-test-token";
+
+    let mut server = std::process::Command::new(env!("CARGO_BIN_EXE_soroban-debug"))
+        .args([
+            "server",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            &port.to_string(),
+            "--token",
+            token,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("Failed to spawn soroban-debug server");
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let result: Result<String, String> = (|| {
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+            .map_err(|e| format!("connect failed: {}", e))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(4)))
+            .map_err(|e| format!("set_read_timeout: {}", e))?;
+
+        // Send Authenticate WITHOUT a prior Handshake — this is the legacy ordering.
+        let auth_msg = format!(
+            "{{\"id\":1,\"request\":{{\"type\":\"Authenticate\",\"token\":\"{}\"}}}}\n",
+            token
+        );
+        stream
+            .write_all(auth_msg.as_bytes())
+            .map_err(|e| format!("write failed: {}", e))?;
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        reader
+            .read_line(&mut response)
+            .map_err(|e| format!("read failed: {}", e))?;
+        Ok(response)
+    })();
+
+    let _ = server.kill();
+    let _ = server.wait();
+
+    match result {
+        Ok(response) => {
+            assert!(
+                response.contains("\"success\":true"),
+                "Server must accept Authenticate sent before Handshake (backward-compat). \
+                 Got: {}",
+                response
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "Skipping parity_dap_auth_before_handshake_is_accepted: {} – \
+                 see docs/remote-troubleshooting.md.",
+                e
+            );
         }
     }
 }

@@ -1,10 +1,11 @@
-﻿import {
+import {
   DebugSession,
   InitializedEvent,
   StoppedEvent,
   ExitedEvent
 } from '@vscode/debugadapter';
 import { DebugProtocol } from '@vscode/debugprotocol';
+import * as fs from 'fs';
 import * as readline from 'readline';
 import {
   DebuggerProcess,
@@ -18,6 +19,7 @@ import { VariableStore } from './variableStore';
 import { ResolvedBreakpoint, resolveSourceBreakpoints } from './sourceBreakpoints';
 import { LogOutputEvent, LogLevel } from '@vscode/debugadapter/lib/logger';
 import { LogManager, LogLevel as ManagerLogLevel, LogPhase } from '../debug/logManager';
+import { EventsTreeDataProvider } from '../eventsTree';
 
 
 
@@ -58,9 +60,33 @@ function parseRuntimeError(error: unknown): StructuredRuntimeError {
 }
 type LaunchRequestArgs = DebugProtocol.LaunchRequestArguments & DebuggerProcessConfig;
 
+type BreakpointResolutionLogRecord = {
+  source: string;
+  requestedLine: number;
+  resolvedLine: number;
+  functionName?: string;
+  verified: boolean;
+  setBreakpoint: boolean;
+  reasonCode?: string;
+  message?: string;
+};
+
+type BreakpointSyncLogRecord = {
+  source: string;
+  action: 'clear' | 'set';
+  breakpointId: string;
+  functionName?: string;
+  success: boolean;
+  error?: string;
+};
+
+const BREAKPOINT_SYNC_TEST_LOG_ENV = 'SOROBAN_DEBUG_BREAKPOINT_SYNC_TEST_LOG';
+
 export class SorobanDebugSession extends DebugSession {
+  private static readonly FIRST_CONTINUE_STOP_REASON: 'breakpoint' = 'breakpoint';
   private logManager: LogManager | undefined;
   private debuggerProcess: DebuggerProcess | null = null;
+  private eventsTreeDataProvider: EventsTreeDataProvider | undefined;
   private state: DebuggerState = {
     isRunning: false,
     isPaused: false,
@@ -79,14 +105,17 @@ export class SorobanDebugSession extends DebugSession {
   private hasExecuted = false;
   private exportedFunctions = new Set<string>();
   private sourceFunctionBreakpoints = new Map<string, Set<string>>();
+  private breakpointFunctionHistory = new Map<string, Map<number, string>>();
   private requestAbortControllers = new Map<number, AbortController>();
   private refreshAbortController: AbortController | null = null;
   private refreshGeneration = 0;
   private launchLifecycleReporter?: (event: LaunchLifecycleEvent) => void;
+  private batchArgsPath?: string;
 
   constructor(
     logManagerOrLinesStartAt1?: LogManager | boolean,
-    launchLifecycleReporterOrIsServer?: ((event: LaunchLifecycleEvent) => void) | boolean
+    launchLifecycleReporterOrIsServer?: ((event: LaunchLifecycleEvent) => void) | boolean,
+    eventsTreeDataProvider?: EventsTreeDataProvider
   ) {
     super(
       typeof logManagerOrLinesStartAt1 === 'boolean' ? logManagerOrLinesStartAt1 : true,
@@ -96,6 +125,7 @@ export class SorobanDebugSession extends DebugSession {
     this.launchLifecycleReporter = typeof launchLifecycleReporterOrIsServer === 'boolean'
       ? undefined
       : launchLifecycleReporterOrIsServer;
+    this.eventsTreeDataProvider = eventsTreeDataProvider;
   }
 
   protected initializeRequest(
@@ -138,12 +168,19 @@ export class SorobanDebugSession extends DebugSession {
         trace: args.trace || false,
         binaryPath: args.binaryPath,
         port: args.port,
+        host: args.host,
         token: args.token,
         requestTimeoutMs: args.requestTimeoutMs,
-        connectTimeoutMs: args.connectTimeoutMs
+        connectTimeoutMs: args.connectTimeoutMs,
+        storageFilter: args.storageFilter,
+        repeat: args.repeat,
+        tlsCert: args.tlsCert,
+        tlsKey: args.tlsKey,
+        batchArgs: args.batchArgs
       }, this.logManager, this.launchLifecycleReporter);
 
       await this.debuggerProcess.start();
+      this.batchArgsPath = args.batchArgs;
       this.state.isRunning = true;
       this.state.isPaused = false;
       this.hasExecuted = false;
@@ -163,6 +200,52 @@ export class SorobanDebugSession extends DebugSession {
         : `Failed to launch debugger: ${String(error)}`;
       this.sendErrorResponse(response, {
         id: 1001,
+        format: message,
+        showUser: true
+      });
+    }
+  }
+
+  protected async attachRequest(
+    response: DebugProtocol.AttachResponse,
+    args: DebugProtocol.AttachRequestArguments & DebuggerProcessConfig
+  ): Promise<void> {
+    this.logManager?.log(ManagerLogLevel.Info, LogPhase.DAP, `AttachRequest: ${JSON.stringify(args)}`);
+    try {
+      const attachConfig: DebuggerProcessConfig = { 
+        ...args, 
+        spawnServer: false,
+        storageFilter: args.storageFilter,
+        repeat: args.repeat
+      };
+      const preflight = await validateLaunchConfig(attachConfig);
+      if (!preflight.ok) {
+        const issue = preflight.issues[0];
+        throw new Error(`${issue.message} Expected: ${issue.expected}`);
+      }
+
+      this.debuggerProcess = new DebuggerProcess(attachConfig, this.logManager, this.launchLifecycleReporter);
+
+      await this.debuggerProcess.start();
+      this.state.isRunning = true;
+      this.state.isPaused = false;
+      this.hasExecuted = false;
+      this.variableStore.reset();
+      this.exportedFunctions = await this.debuggerProcess.getContractFunctions();
+      this.backendCapabilities = await this.debuggerProcess.getCapabilities().catch(() => ({
+        conditionalBreakpoints: false,
+        hitConditionalBreakpoints: false,
+        logPoints: false
+      }));
+
+      this.attachProcessListeners();
+      this.sendResponse(response);
+    } catch (error) {
+      const message = error instanceof DebuggerTimeoutError
+        ? `Failed to attach to debugger (timeout): ${error.message}\n\nNext steps: ensure the remote server is running and reachable at the configured host:port, then retry.`
+        : `Failed to attach to debugger: ${String(error)}`;
+      this.sendErrorResponse(response, {
+        id: 1002,
         format: message,
         showUser: true
       });
@@ -189,7 +272,7 @@ export class SorobanDebugSession extends DebugSession {
           message: 'Debugger is not launched or source path is unavailable'
         }));
       } else {
-        let serverResolved: Array<{ requestedLine: number; line: number; verified: boolean; functionName?: string; reasonCode: string; message: string }> | null = null;
+        let serverResolved: Array<{ requestedLine: number; line: number; verified: boolean; functionName?: string; reasonCode: string; message: string; setBreakpoint?: boolean }> | null = null;
         try {
           serverResolved = await this.debuggerProcess.resolveSourceBreakpoints(source, lines, this.exportedFunctions);
         } catch {
@@ -200,8 +283,9 @@ export class SorobanDebugSession extends DebugSession {
           ? serverResolved.every((bp) => ['NO_DEBUG_INFO', 'FILE_NOT_IN_DEBUG_INFO', 'WASM_PARSE_ERROR'].includes(bp.reasonCode))
           : false;
 
+        const sourceHistory = this.breakpointFunctionHistory.get(source);
         if (serverResolved && shouldFallbackHeuristic) {
-          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions, sourceHistory);
         } else if (serverResolved) {
           resolved = serverResolved.map((bp) => ({
             requestedLine: bp.requestedLine,
@@ -210,10 +294,10 @@ export class SorobanDebugSession extends DebugSession {
             functionName: bp.functionName,
             reasonCode: bp.reasonCode,
             message: bp.message,
-            setBreakpoint: bp.verified && Boolean(bp.functionName)
+            setBreakpoint: bp.setBreakpoint
           }));
         } else {
-          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions);
+          resolved = resolveSourceBreakpoints(source, lines, this.exportedFunctions, sourceHistory);
         }
       }
 
@@ -230,6 +314,25 @@ export class SorobanDebugSession extends DebugSession {
           logMessage: bp.logMessage
         };
       });
+
+      for (const bp of breakpoints) {
+        const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.requestedLine === bp.line);
+        const resolutionRecord: BreakpointResolutionLogRecord = {
+          source,
+          requestedLine: bp.line,
+          resolvedLine: match?.line ?? bp.line,
+          functionName: match?.functionName,
+          verified: match?.verified ?? false,
+          setBreakpoint: Boolean(match?.setBreakpoint && match?.functionName),
+          reasonCode: match?.reasonCode,
+          message: match?.message,
+        };
+        this.logManager?.log(
+          ManagerLogLevel.Debug,
+          LogPhase.DAP,
+          `BREAKPOINT_RESOLUTION ${JSON.stringify(resolutionRecord)}`
+        );
+      }
 
       const syncErrors = await this.syncSourceBreakpoints(
         source,
@@ -253,18 +356,38 @@ export class SorobanDebugSession extends DebugSession {
         )
       );
 
+      const updatedHistory = this.breakpointFunctionHistory.get(source) ?? new Map<number, string>();
+      for (const bp of resolved) {
+        if (bp.functionName) {
+          updatedHistory.set(bp.requestedLine, bp.functionName);
+        } else {
+          updatedHistory.delete(bp.requestedLine);
+        }
+      }
+      if (updatedHistory.size > 0) {
+        this.breakpointFunctionHistory.set(source, updatedHistory);
+      } else {
+        this.breakpointFunctionHistory.delete(source);
+      }
+
       response.body = {
         breakpoints: breakpoints.map((bp) => {
           const match = resolved.find((resolvedBreakpoint) => resolvedBreakpoint.requestedLine === bp.line);
           const mbp = managedBreakpoints.find(m => m.line === bp.line);
           const syncMessage = mbp ? syncErrors.get(mbp.id) : undefined;
           const capabilityMessages = this.describeCapabilityFallback(bp);
+          const reasonCode = match?.reasonCode;
+          const reasonMessage = match?.message;
+          const composedMessage = reasonCode
+            ? `${reasonCode}: ${reasonMessage ?? 'No additional diagnostic message'}`
+            : reasonMessage;
           return {
             verified: match?.verified ?? false,
             line: match?.line ?? bp.line,
             column: bp.column,
             source: args.source,
-            message: match?.message,
+            message: composedMessage,
+            reasonCode,
           }
         })
       };
@@ -317,6 +440,17 @@ export class SorobanDebugSession extends DebugSession {
       variablesReference: argsRef,
       expensive: false
     });
+
+    const localsKeys = this.state.locals ? Object.keys(this.state.locals) : [];
+    if (localsKeys.length > 0) {
+      const localsRef = this.variableStore.createListHandle(this.variableStore.variablesFromLocals(this.state.locals as Record<string, unknown>));
+
+      scopes.push({
+        name: 'Locals',
+        variablesReference: localsRef,
+        expensive: false
+      });
+    }
 
     const storageKeys = this.state.storage ? Object.keys(this.state.storage) : [];
     if (storageKeys.length > 0) {
@@ -386,6 +520,58 @@ export class SorobanDebugSession extends DebugSession {
         return;
       }
 
+      if (expression.startsWith('storage.search ')) {
+        const query = expression.slice('storage.search '.length).trim();
+        if (!query) {
+          throw new Error('Usage: storage.search <query>');
+        }
+        const storageData = this.state.storage as Record<string, unknown> ?? {};
+        const searchResult = this.variableStore.searchStorage(storageData, query);
+        const matchVars = searchResult.variables;
+        const ref = matchVars.length > 0
+          ? this.variableStore.createListHandle(matchVars)
+          : 0;
+        const summary = searchResult.truncated
+          ? `Found ${searchResult.totalMatches} matches (showing first ${matchVars.length})`
+          : `Found ${searchResult.totalMatches} match(es)`;
+        response.body = {
+          result: summary,
+          variablesReference: ref
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      if (expression.startsWith('storage.page ')) {
+        const pageStr = expression.slice('storage.page '.length).trim();
+        const pageNum = parseInt(pageStr, 10);
+        if (isNaN(pageNum) || pageNum < 1) {
+          throw new Error('Usage: storage.page <number> (1-based)');
+        }
+        const storageData = this.state.storage as Record<string, unknown> ?? {};
+        const pageResult = this.variableStore.pagedStorage(storageData, pageNum - 1);
+        const ref = pageResult.variables.length > 0
+          ? this.variableStore.createListHandle(pageResult.variables)
+          : 0;
+        response.body = {
+          result: `Page ${pageResult.page + 1}/${pageResult.totalPages} (${pageResult.totalEntries} total entries)`,
+          variablesReference: ref
+        };
+        this.sendResponse(response);
+        return;
+      }
+
+      if (expression === 'storage.count') {
+        const storageData = this.state.storage as Record<string, unknown> ?? {};
+        const count = Object.keys(storageData).length;
+        response.body = {
+          result: `${count} storage entries`,
+          variablesReference: 0
+        };
+        this.sendResponse(response);
+        return;
+      }
+
       if (expression.startsWith('storage.')) {
         const key = expression.slice('storage.'.length);
         const value = this.state.storage ? (this.state.storage as Record<string, unknown>)[key] : undefined;
@@ -446,7 +632,8 @@ export class SorobanDebugSession extends DebugSession {
       this.sendResponse(response);
 
       if (!this.hasExecuted) {
-        await this.runExecution('breakpoint');
+        // After the synthetic entry stop, the first continue should surface as a breakpoint stop.
+        await this.runExecution(SorobanDebugSession.FIRST_CONTINUE_STOP_REASON);
         return;
       }
 
@@ -458,6 +645,7 @@ export class SorobanDebugSession extends DebugSession {
       if (result.paused) {
         await this.refreshState();
         this.state.isPaused = true;
+        await this.updateEvents();
         this.sendEvent(new StoppedEvent('breakpoint', this.threadId));
         return;
       }
@@ -587,6 +775,11 @@ export class SorobanDebugSession extends DebugSession {
       throw new Error('Debugger process is not running');
     }
 
+    if (this.batchArgsPath) {
+      await this.runBatchExecution();
+      return;
+    }
+
     const result = await this.debuggerProcess.execute();
     this.hasExecuted = true;
     await this.refreshState();
@@ -596,12 +789,61 @@ export class SorobanDebugSession extends DebugSession {
 
     if (result.paused) {
       this.state.isPaused = true;
+      await this.updateEvents();
       this.sendEvent(new StoppedEvent(reason, this.threadId));
       return;
     }
 
     this.state.isPaused = false;
     this.sendEvent(new ExitedEvent(0));
+    await this.stop();
+  }
+
+  private async runBatchExecution(): Promise<void> {
+    if (!this.debuggerProcess || !this.batchArgsPath) {
+      throw new Error('Batch execution requires a debugger process and batch-args path');
+    }
+
+    const raw = fs.readFileSync(this.batchArgsPath, 'utf-8');
+    const batchItems: unknown[][] = JSON.parse(raw);
+
+    if (!Array.isArray(batchItems)) {
+      throw new Error('batch-args file must contain a JSON array of argument sets');
+    }
+
+    this.sendEvent(new LogOutputEvent(
+      `\n=== Batch Execution: ${batchItems.length} test case(s) ===\n\n`,
+      LogLevel.Log
+    ));
+
+    const results = await this.debuggerProcess.executeBatch(batchItems);
+    this.hasExecuted = true;
+
+    let passed = 0;
+    let failed = 0;
+    for (const r of results) {
+      const status = r.success ? 'PASS' : 'FAIL';
+      if (r.success) { passed++; } else { failed++; }
+      const argsStr = JSON.stringify(r.args);
+      this.sendEvent(new LogOutputEvent(
+        `[${r.index + 1}/${batchItems.length}] ${status} args=${argsStr}`,
+        r.success ? LogLevel.Log : LogLevel.Error
+      ));
+      if (r.output) {
+        this.sendEvent(new LogOutputEvent(`  Result: ${r.output}\n`, LogLevel.Log));
+      }
+      if (r.error) {
+        this.sendEvent(new LogOutputEvent(`  Error: ${r.error}\n`, LogLevel.Error));
+      }
+    }
+
+    this.sendEvent(new LogOutputEvent(
+      `\n=== Batch Summary: ${passed} passed, ${failed} failed, ${batchItems.length} total ===\n`,
+      LogLevel.Log
+    ));
+
+    this.state.isPaused = false;
+    this.sendEvent(new ExitedEvent(failed > 0 ? 1 : 0));
     await this.stop();
   }
 
@@ -673,6 +915,18 @@ export class SorobanDebugSession extends DebugSession {
 
     for (const breakpoint of previousBreakpoints) {
       await this.debuggerProcess.clearBreakpoint(breakpoint.id);
+      const clearRecord: BreakpointSyncLogRecord = {
+        source,
+        action: 'clear',
+        breakpointId: breakpoint.id,
+        functionName: breakpoint.functionName,
+        success: true,
+      };
+      this.logManager?.log(
+        ManagerLogLevel.Debug,
+        LogPhase.DAP,
+        `BREAKPOINT_SYNC ${JSON.stringify(clearRecord)}`
+      );
     }
 
     for (const breakpoint of nextBreakpoints) {
@@ -684,15 +938,51 @@ export class SorobanDebugSession extends DebugSession {
           hitCondition: breakpoint.hitCondition,
           logMessage: breakpoint.logMessage
         });
+        const setRecord: BreakpointSyncLogRecord = {
+          source,
+          action: 'set',
+          breakpointId: breakpoint.id,
+          functionName: breakpoint.functionName,
+          success: true,
+        };
+        this.logManager?.log(
+          ManagerLogLevel.Debug,
+          LogPhase.DAP,
+          `BREAKPOINT_SYNC ${JSON.stringify(setRecord)}`
+        );
+        this.emitBreakpointSyncTestLog(setRecord);
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
         errors.set(
           breakpoint.id,
-          error instanceof Error ? error.message : String(error)
+          errorMessage
+        );
+        const setRecord: BreakpointSyncLogRecord = {
+          source,
+          action: 'set',
+          breakpointId: breakpoint.id,
+          functionName: breakpoint.functionName,
+          success: false,
+          error: errorMessage,
+        };
+        this.logManager?.log(
+          ManagerLogLevel.Debug,
+          LogPhase.DAP,
+          `BREAKPOINT_SYNC ${JSON.stringify(setRecord)}`
         );
       }
     }
 
     return errors;
+  }
+
+  private emitBreakpointSyncTestLog(record: BreakpointSyncLogRecord): void {
+    if (process.env[BREAKPOINT_SYNC_TEST_LOG_ENV] !== '1' || record.action !== 'set' || !record.success) {
+      return;
+    }
+
+    // Temporary stderr log for e2e regression coverage of heuristic breakpoint sync.
+    process.stderr.write(`BREAKPOINT_SYNC_TEST ${JSON.stringify(record)}\n`);
   }
 
   private async refreshState(): Promise<void> {
@@ -783,6 +1073,7 @@ export class SorobanDebugSession extends DebugSession {
     this.state.args = undefined;
     this.hasExecuted = false;
     this.sourceFunctionBreakpoints.clear();
+    this.breakpointFunctionHistory.clear();
   }
 
   private describeCapabilityFallback(bp: DebugProtocol.SourceBreakpoint): string | undefined {
@@ -799,6 +1090,17 @@ export class SorobanDebugSession extends DebugSession {
     }
 
     return notices.length > 0 ? notices.join(' ') : undefined;
+  }
+
+  private async updateEvents(): Promise<void> {
+    if (this.debuggerProcess && this.eventsTreeDataProvider) {
+      try {
+        const events = await this.debuggerProcess.getEvents();
+        this.eventsTreeDataProvider.refresh(events);
+      } catch (e) {
+        this.logManager?.log(ManagerLogLevel.Error, LogPhase.DAP, `Failed to update events: ${e}`);
+      }
+    }
   }
 }
 

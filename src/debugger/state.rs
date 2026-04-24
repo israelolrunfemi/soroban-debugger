@@ -1,5 +1,6 @@
 use crate::debugger::instruction_pointer::{InstructionPointer, StepMode};
 use crate::inspector::stack::CallStackInspector;
+use crate::output::InvocationReason;
 use crate::runtime::instruction::Instruction;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +9,7 @@ use serde::{Deserialize, Serialize};
 pub struct DebugState {
     current_function: Option<String>,
     current_args: Option<String>,
+    current_invocation_reason: Option<InvocationReason>,
     step_count: usize,
     instruction_pointer: InstructionPointer,
     #[serde(skip)]
@@ -24,6 +26,7 @@ impl DebugState {
         Self {
             current_function: None,
             current_args: None,
+            current_invocation_reason: None,
             step_count: 0,
             instruction_pointer: InstructionPointer::new(),
             current_instruction: None,
@@ -34,9 +37,15 @@ impl DebugState {
     }
 
     /// Set the current function being executed
-    pub fn set_current_function(&mut self, function: String, args: Option<String>) {
+    pub fn set_current_function(
+        &mut self,
+        function: String,
+        args: Option<String>,
+        invocation_reason: Option<InvocationReason>,
+    ) {
         self.current_function = Some(function);
         self.current_args = args;
+        self.current_invocation_reason = invocation_reason;
     }
 
     pub fn current_function(&self) -> Option<&str> {
@@ -46,6 +55,10 @@ impl DebugState {
     /// Get current function arguments
     pub fn current_args(&self) -> Option<&str> {
         self.current_args.as_deref()
+    }
+
+    pub fn current_invocation_reason(&self) -> Option<InvocationReason> {
+        self.current_invocation_reason
     }
 
     /// Increment step count

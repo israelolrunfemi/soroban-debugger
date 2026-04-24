@@ -90,6 +90,28 @@ fn symbolic_cli_honors_caps_and_reports_truncation() {
 }
 
 #[test]
+fn symbolic_json_outputs_path_decisions() {
+    let wasm = fixture_wasm("counter");
+
+    base_cmd()
+        .args([
+            "symbolic",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "increment",
+            "--format",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"status\": \"success\""))
+        .stdout(predicate::str::contains("\"kind\": \"StorageWrite\""))
+        .stdout(predicate::str::contains("\"kind\": \"StorageRead\""))
+        .stdout(predicate::str::contains("\"path_decisions\": ["));
+}
+
+#[test]
 fn analyze_json_outputs_findings_array() {
     let wasm = fixture_wasm("counter");
 
@@ -666,6 +688,68 @@ fn repl_supports_conditional_breakpoints() {
     assert!(
         combined.contains("Execution paused") && combined.contains("increment"),
         "Conditional breakpoint was not hit in REPL\n{}",
+        combined
+    );
+}
+
+//
+// Regression test for issue #690:
+// Ensure that --export-storage writes storage exactly once, not twice.
+// See: https://github.com/Timi16/soroban-debugger/issues/690
+//
+#[test]
+fn run_export_storage_performs_single_export() {
+    let wasm = fixture_wasm("counter");
+    let export_file = NamedTempFile::new().unwrap();
+    let export_path = export_file.path();
+
+    let output = base_cmd()
+        .args([
+            "run",
+            "--contract",
+            wasm.to_str().unwrap(),
+            "--function",
+            "increment",
+            "--export-storage",
+            export_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Count how many times "Exporting storage" appears in output
+    let export_count = combined.matches("Exporting storage").count();
+    assert_eq!(
+        export_count, 1,
+        "Expected 'Exporting storage' to appear exactly once, but found {} occurrences.\nOutput:\n{}",
+        export_count,
+        combined
+    );
+
+    // Verify the exported file was created and contains valid JSON
+    assert!(
+        export_path.exists(),
+        "Exported storage file was not created at {:?}",
+        export_path
+    );
+
+    let exported_content =
+        fs::read_to_string(export_path).expect("Failed to read exported storage file");
+
+    // Verify it's valid JSON
+    let _: serde_json::Value = serde_json::from_str(&exported_content)
+        .expect("Exported storage file does not contain valid JSON");
+
+    // Verify success message with entry count appears.
+    let has_success_message = combined.contains("Exported") && combined.contains("storage entries");
+    assert!(
+        has_success_message,
+        "Expected success message with 'Exported X storage entries' to appear in output.\nOutput:\n{}",
         combined
     );
 }

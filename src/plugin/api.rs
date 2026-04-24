@@ -2,7 +2,6 @@ use super::events::{EventContext, ExecutionEvent};
 use super::manifest::PluginManifest;
 use std::any::Any;
 
-/// Result type for plugin operations
 pub type PluginResult<T> = Result<T, PluginError>;
 
 /// Errors that can occur during plugin operations
@@ -43,9 +42,26 @@ pub enum PluginError {
     /// Plugin has been temporarily disabled by the circuit breaker
     #[error("Plugin circuit breaker open: {0}")]
     CircuitOpen(String),
+
+    /// Plugin panicked; the core debugger contained the failure
+    #[error("Plugin '{plugin}' panicked during {operation}: {details}")]
+    Panic {
+        plugin: String,
+        operation: String,
+        details: String,
+    },
+
+    /// Plugin has been disabled for the current session after an incident
+    #[error("Plugin '{plugin}' disabled for current session: {reason}")]
+    SessionDisabled { plugin: String, reason: String },
 }
 
-/// Custom CLI command that a plugin can provide
+/// Custom CLI command that a plugin can provide.
+///
+/// Plugin command names are matched case-insensitively and normalized by
+/// trimming whitespace. Conflicts between plugins are resolved deterministically
+/// by plugin name precedence, and collisions are exposed through the plugin
+/// registry.
 #[derive(Debug, Clone)]
 pub struct PluginCommand {
     /// Command name
@@ -58,7 +74,11 @@ pub struct PluginCommand {
     pub arguments: Vec<(String, String, bool)>,
 }
 
-/// Custom output formatter that a plugin can provide
+/// Custom output formatter that a plugin can provide.
+///
+/// Formatter names are matched case-insensitively and normalized by trimming
+/// whitespace. If multiple plugins provide the same formatter, a deterministic
+/// winner is chosen and the conflict is recorded.
 #[derive(Debug, Clone)]
 pub struct OutputFormatter {
     /// Formatter name

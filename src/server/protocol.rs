@@ -88,6 +88,7 @@ pub enum DynamicTraceEventKind {
     Authorization,
     CrossContractCall,
     CrossContractReturn,
+    Branch,
 }
 
 /// Rich dynamic trace entry produced by the runtime and consumed by analyzers.
@@ -106,6 +107,8 @@ pub struct DynamicTraceEvent {
     /// Actor address associated with this event (e.g., the address being authorized).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation_reason: Option<crate::output::InvocationReason>,
 }
 
 /// Source location information (file, line, column)
@@ -117,6 +120,16 @@ pub struct SourceLocation {
     pub line: u32,
     /// 0-based column (optional)
     pub column: Option<u32>,
+}
+
+impl From<crate::debugger::source_map::SourceLocation> for SourceLocation {
+    fn from(loc: crate::debugger::source_map::SourceLocation) -> Self {
+        Self {
+            file: loc.file.to_string_lossy().to_string(),
+            line: loc.line,
+            column: loc.column,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +158,10 @@ pub enum DebugRequest {
         client_version: String,
         protocol_min: u32,
         protocol_max: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_interval_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_timeout_ms: Option<u32>,
     },
 
     /// Authenticate with the server
@@ -211,6 +228,8 @@ pub enum DebugRequest {
         source_path: String,
         lines: Vec<u32>,
         exported_functions: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_forward_line_adjust: Option<u32>,
     },
 
     /// Set initial storage
@@ -231,6 +250,9 @@ pub enum DebugRequest {
     /// Disconnect
     Disconnect,
 
+    /// Get diagnostic and contract events
+    GetEvents,
+
     /// Cancel a running execution
     Cancel,
 
@@ -250,6 +272,10 @@ pub enum DebugResponse {
         protocol_min: u32,
         protocol_max: u32,
         selected_version: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        heartbeat_interval_ms: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        idle_timeout_ms: Option<u32>,
     },
 
     /// Handshake failed due to protocol mismatch.
@@ -364,6 +390,11 @@ pub enum DebugResponse {
 
     /// Cancel acknowledged
     CancelAck,
+
+    /// List of events
+    EventsList {
+        events: Vec<crate::server::protocol::DynamicTraceEvent>,
+    },
 
     /// Catch-all for forward compatibility
     #[serde(other)]

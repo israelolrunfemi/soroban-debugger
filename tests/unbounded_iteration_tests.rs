@@ -196,7 +196,7 @@ fn has_unbounded_iteration_finding(wasm: &[u8]) -> bool {
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(wasm, None, None, &filter)
+        .analyze(wasm, None, None, &filter, "test_contract.wasm")
         .expect("analysis failed");
     report
         .findings
@@ -210,7 +210,7 @@ fn get_unbounded_iteration_finding(
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(wasm, None, None, &filter)
+        .analyze(wasm, None, None, &filter, "test_contract.wasm")
         .expect("analysis failed");
     report
         .findings
@@ -222,7 +222,7 @@ fn has_storage_write_pressure_finding(wasm: &[u8]) -> bool {
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(wasm, None, None, &filter)
+        .analyze(wasm, None, None, &filter, "test_contract.wasm")
         .expect("analysis failed");
     report
         .findings
@@ -236,7 +236,7 @@ fn get_storage_write_pressure_finding(
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(wasm, None, None, &filter)
+        .analyze(wasm, None, None, &filter, "test_contract.wasm")
         .expect("analysis failed");
     report
         .findings
@@ -345,7 +345,7 @@ fn dynamic_analysis_detects_high_storage_pressure() {
 
     // Create a trace with many storage reads (simulating unbounded iteration)
     for i in 0..100 {
-        trace.push(DynamicTraceEvent {
+        trace.push(DynamicTraceEvent { invocation_reason: None, 
             sequence: i as usize,
             kind: DynamicTraceEventKind::StorageRead,
             message: String::new(),
@@ -355,13 +355,14 @@ fn dynamic_analysis_detects_high_storage_pressure() {
             storage_value: None,
             call_depth: Some(0),
             address: None,
+            invocation_reason: None,
         });
     }
 
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(&[], None, Some(&trace), &filter)
+        .analyze(&[], None, Some(&trace), &filter, "test_contract.wasm")
         .expect("analysis failed");
 
     let unbounded_findings: Vec<_> = report
@@ -391,7 +392,7 @@ fn dynamic_analysis_ignores_reasonable_storage_access() {
 
     // Create a trace with reasonable storage access
     for i in 0..10 {
-        trace.push(DynamicTraceEvent {
+        trace.push(DynamicTraceEvent { invocation_reason: None, 
             sequence: i as usize,
             kind: DynamicTraceEventKind::StorageRead,
             message: String::new(),
@@ -401,13 +402,14 @@ fn dynamic_analysis_ignores_reasonable_storage_access() {
             storage_value: None,
             call_depth: Some(0),
             address: None,
+            invocation_reason: None,
         });
     }
 
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(&[], None, Some(&trace), &filter)
+        .analyze(&[], None, Some(&trace), &filter, "test_contract.wasm")
         .expect("analysis failed");
 
     let unbounded_findings: Vec<_> = report
@@ -470,7 +472,7 @@ fn dynamic_analysis_detects_high_storage_write_pressure() {
     let mut trace = Vec::new();
 
     for i in 0..48 {
-        trace.push(DynamicTraceEvent {
+        trace.push(DynamicTraceEvent { invocation_reason: None, 
             sequence: i as usize,
             kind: DynamicTraceEventKind::StorageWrite,
             message: String::new(),
@@ -480,13 +482,14 @@ fn dynamic_analysis_detects_high_storage_write_pressure() {
             storage_value: Some(format!("value_{}", i)),
             call_depth: None,
             address: None,
+            invocation_reason: None,
         });
     }
 
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(&[], None, Some(&trace), &filter)
+        .analyze(&[], None, Some(&trace), &filter, "test_contract.wasm")
         .expect("analysis failed");
 
     let write_findings: Vec<_> = report
@@ -523,7 +526,7 @@ fn dynamic_analysis_ignores_reasonable_storage_write_access() {
     let mut trace = Vec::new();
 
     for i in 0..8 {
-        trace.push(DynamicTraceEvent {
+        trace.push(DynamicTraceEvent { invocation_reason: None, 
             sequence: i as usize,
             kind: DynamicTraceEventKind::StorageWrite,
             message: String::new(),
@@ -533,13 +536,14 @@ fn dynamic_analysis_ignores_reasonable_storage_write_access() {
             storage_value: Some(format!("value_{}", i)),
             call_depth: None,
             address: None,
+            invocation_reason: None,
         });
     }
 
     let analyzer = SecurityAnalyzer::new();
     let filter = AnalyzerFilter::default();
     let report = analyzer
-        .analyze(&[], None, Some(&trace), &filter)
+        .analyze(&[], None, Some(&trace), &filter, "test_contract.wasm")
         .expect("analysis failed");
 
     assert!(

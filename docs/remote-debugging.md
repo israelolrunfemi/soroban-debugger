@@ -9,7 +9,7 @@ This guide focuses on two things:
 1. How the feature works.
 2. How to deploy it without making unsafe assumptions about tokens or transport security.
 
-> **Note: Remote client mode is CLI-only.** The `soroban-debug remote` command and TLS configuration are not available through the VS Code extension. The extension spawns and manages the debug server locally as a subprocess. If you need to debug against a remote server from VS Code, see the [VS Code Extension and Remote Mode](#vs-code-extension-and-remote-mode) section below. For a full breakdown of what each surface supports, see the [Feature Matrix](feature-matrix.md#remote-debugging).
+> **Note: Remote client mode is supported in both the CLI and VS Code extension.** Use the `soroban-debug remote` command in the CLI, or set `request: "attach"` in your VS Code `launch.json`. For a full breakdown of what each surface supports, see the [Feature Matrix](feature-matrix.md#remote-debugging).
 
 ## Architecture
 
@@ -27,13 +27,13 @@ On the remote system:
 
 ```bash
 # Only for trusted local development on an isolated machine.
-soroban-debug server --port 9229
+soroban-debug server --host 127.0.0.1 --port 9229
 
 # Token-protected server on a trusted private network.
-soroban-debug server --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
+soroban-debug server --host 127.0.0.1 --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
 
 # Token + TLS on an untrusted network.
-soroban-debug server --port 9229 \
+soroban-debug server --host 10.0.0.15 --port 9229 \
   --token "$SOROBAN_DEBUG_TOKEN" \
   --tls-cert /path/to/cert.pem \
   --tls-key /path/to/key.pem
@@ -41,10 +41,13 @@ soroban-debug server --port 9229 \
 
 ### Connect from a client
 
-```bash
+
 soroban-debug remote \
   --remote localhost:9229 \
   --token "$SOROBAN_DEBUG_TOKEN" \
+  --tls-cert /path/to/client-cert.pem \
+  --tls-key /path/to/client-key.pem \
+  --tls-ca /path/to/server-ca.pem \
   --contract ./contract.wasm \
   --function increment \
   --args '["user1", 100]'
@@ -85,6 +88,8 @@ Use one of these patterns:
 3. **TLS termination in front of the server**: place the server behind a reverse proxy, service mesh sidecar, or tunnel that provides authenticated encrypted transport.
 4. **Native TLS in the debugger**: use `--tls-cert` and `--tls-key` when the server itself is directly reachable over an untrusted network.
 
+The server defaults to `--host 127.0.0.1`. Use `--host` explicitly when you intend to bind to a private-network interface, and avoid `0.0.0.0` unless that exposure is intentional and protected.
+
 ### Token handling guidance
 
 - Generate tokens with a cryptographically secure RNG.
@@ -106,13 +111,13 @@ Prefer:
 
 ```bash
 export SOROBAN_DEBUG_TOKEN="$(openssl rand -hex 32)"
-soroban-debug server --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
+soroban-debug server --host 127.0.0.1 --port 9229 --token "$SOROBAN_DEBUG_TOKEN"
 ```
 
 Avoid:
 
 ```bash
-soroban-debug server --port 9229 --token mySecretToken123
+soroban-debug server --host 0.0.0.0 --port 9229 --token mySecretToken123
 ```
 
 The second form is easy to leak through shell history, process listings, shared transcripts, and copied terminal logs.
@@ -122,6 +127,9 @@ The second form is easy to leak through shell history, process listings, shared 
 ### TLS
 
 Use TLS whenever the server is reachable beyond a tightly controlled private boundary.
+Native TLS is enabled only when you provide both `--tls-cert` and `--tls-key`.
+Supplying only one of those flags is rejected during server startup.
+If startup fails with that validation error, either provide both flags together or remove both flags and keep transport private (for example, loopback + SSH tunnel).
 
 ```bash
 openssl req -x509 -newkey rsa:4096 \
@@ -130,6 +138,7 @@ openssl req -x509 -newkey rsa:4096 \
   -subj "/CN=localhost"
 
 soroban-debug server --port 9229 \
+  --host 127.0.0.1 \
   --token "$SOROBAN_DEBUG_TOKEN" \
   --tls-cert cert.pem \
   --tls-key key.pem
@@ -208,7 +217,7 @@ When the server receives a shutdown signal:
 ### Clean termination example
 
 ```bash
-soroban-debug server --port 9229 &
+soroban-debug server --host 127.0.0.1 --port 9229 &
 SERVER_PID=$!
 
 # Run your debug session
@@ -229,7 +238,7 @@ When running the server in CI, ensure proper cleanup:
 steps:
   - name: Start Debug Server
     run: |
-      soroban-debug server --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
+      soroban-debug server --host 127.0.0.1 --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
       echo $! > server.pid
       sleep 1
 
@@ -284,7 +293,7 @@ Example:
 steps:
   - name: Start Debug Server
     run: |
-      soroban-debug server --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
+      soroban-debug server --host 127.0.0.1 --port 9229 --token "${{ secrets.DEBUG_TOKEN }}" &
       sleep 2
 
   - name: Remote Debug

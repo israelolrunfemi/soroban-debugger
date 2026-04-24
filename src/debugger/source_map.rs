@@ -39,6 +39,12 @@ pub struct SourceLocation {
 }
 
 /// A diagnostic message indicating an issue with loading DWARF debug metadata.
+///
+/// # Diagnostic construction style
+///
+/// - Static messages (no runtime values): use `"text".to_string()`.
+/// - Dynamic messages (interpolated values): use `format!("text {}", value)`.
+/// - Never use `format!("static string")` — this triggers `clippy::useless_format`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceMapDiagnostic {
     pub message: String,
@@ -57,7 +63,7 @@ pub struct SourceMapMappingPreview {
     pub location: SourceLocation,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SourceMapInspectionReport {
     pub mappings_count: usize,
     pub preview: Vec<SourceMapMappingPreview>,
@@ -65,6 +71,9 @@ pub struct SourceMapInspectionReport {
     pub diagnostics: Vec<SourceMapDiagnostic>,
     pub fallback_mode: String,
     pub fallback_message: String,
+    pub units_processed: usize,
+    pub units_with_line_program: usize,
+    pub coverage_ratio: f64,
 }
 
 /// Manages mapping from WASM offsets to source code locations
@@ -86,6 +95,8 @@ pub struct SourceMap {
     parse_count: usize,
     /// Diagnostics accumulated during DWARF parsing
     pub diagnostics: Vec<SourceMapDiagnostic>,
+    pub units_processed: usize,
+    pub units_with_line_program: usize,
 }
 
 /// Result of resolving a source breakpoint (file + line) to a concrete contract entrypoint breakpoint.
@@ -125,6 +136,8 @@ impl SourceMap {
             last_wasm_hash: None,
             parse_count: 0,
             diagnostics: Vec::new(),
+            units_processed: 0,
+            units_with_line_program: 0,
         }
     }
 
@@ -145,6 +158,8 @@ impl SourceMap {
         // Cache miss: clear stale data and re-parse.
         self.offsets.clear();
         self.last_wasm_hash = None;
+        self.units_processed = 0;
+        self.units_with_line_program = 0;
         self.code_section_range = crate::utils::wasm::code_section_range(wasm_bytes)?;
 
         let mut custom_sections: HashMap<String, &[u8]> = HashMap::new();
@@ -207,6 +222,11 @@ impl SourceMap {
                 }
             };
 
+            self.units_processed += 1;
+            if unit.line_program.is_some() {
+                self.units_with_line_program += 1;
+            }
+
             if let Some(program) = unit.line_program.clone() {
                 let mut rows = program.rows();
                 loop {
@@ -224,22 +244,23 @@ impl SourceMap {
                     if let Some(file_path) =
                         self.get_file_path(&dwarf, &unit, header, row.file_index())
                     {
-                        let offset =
-                            self.normalize_wasm_offset(row.address() as usize, wasm_bytes.len());
+                        let (offset, alt_offset) =
+                            self.normalize_wasm_offsets(row.address() as usize, wasm_bytes.len());
                         let line = row.line().map(|l| l.get() as u32).unwrap_or(0);
                         let column = match row.column() {
                             gimli::ColumnType::LeftEdge => None,
                             gimli::ColumnType::Column(column) => Some(column.get() as u32),
                         };
+                        let location = SourceLocation {
+                            file: file_path,
+                            line,
+                            column,
+                        };
 
-                        self.offsets.insert(
-                            offset,
-                            SourceLocation {
-                                file: file_path,
-                                line,
-                                column,
-                            },
-                        );
+                        self.offsets.insert(offset, location.clone());
+                        if let Some(alt_offset) = alt_offset {
+                            self.offsets.entry(alt_offset).or_insert(location);
+                        }
                     }
                 }
             } else {
@@ -322,11 +343,33 @@ impl SourceMap {
                 diagnostics,
                 fallback_mode,
                 fallback_message,
+                units_processed: source_map.units_processed,
+                units_with_line_program: source_map.units_with_line_program,
+                coverage_ratio: if source_map.units_processed > 0 {
+                    source_map.units_with_line_program as f64 / source_map.units_processed as f64
+                } else {
+                    0.0
+                },
             }),
             Err(err) => {
                 if mappings_count == 0 && diagnostics.is_empty() {
                     return Err(err);
                 }
+
+                // load() failed partway through: any mappings collected are
+                // partial. Downgrade "source" → "partial-source" so the mode
+                // accurately reflects that the parse did not complete.
+                let (fallback_mode, fallback_message) =
+                    if mappings_count > 0 && fallback_mode == "source" {
+                        (
+                            "partial-source".to_string(),
+                            "DWARF parse failed after collecting some mappings; \
+                         results may be incomplete."
+                                .to_string(),
+                        )
+                    } else {
+                        (fallback_mode, fallback_message)
+                    };
 
                 Ok(SourceMapInspectionReport {
                     mappings_count,
@@ -335,6 +378,14 @@ impl SourceMap {
                     diagnostics,
                     fallback_mode,
                     fallback_message,
+                    units_processed: source_map.units_processed,
+                    units_with_line_program: source_map.units_with_line_program,
+                    coverage_ratio: if source_map.units_processed > 0 {
+                        source_map.units_with_line_program as f64
+                            / source_map.units_processed as f64
+                    } else {
+                        0.0
+                    },
                 })
             }
         }
@@ -355,26 +406,45 @@ impl SourceMap {
         self.offsets.iter().map(|(o, l)| (*o, l))
     }
 
-    fn normalize_wasm_offset(&self, dwarf_address: usize, wasm_len: usize) -> usize {
+    fn normalize_wasm_offsets(
+        &self,
+        dwarf_address: usize,
+        wasm_len: usize,
+    ) -> (usize, Option<usize>) {
         let Some(code_range) = &self.code_section_range else {
-            return dwarf_address;
+            return (dwarf_address, None);
         };
 
-        // Common case: DWARF line-program addresses are offsets into the code-section payload.
         let code_start = code_range.start;
+        let code_end = code_range.end;
         let code_len = code_range.end.saturating_sub(code_range.start);
+        let module_candidate = dwarf_address;
 
-        // If the address already looks like a module/file offset, keep it.
-        if dwarf_address >= code_start && dwarf_address < wasm_len {
-            return dwarf_address;
+        let relative_candidate = dwarf_address
+            .checked_add(code_start)
+            .filter(|candidate| *candidate < wasm_len);
+        let module_in_code = module_candidate >= code_start
+            && module_candidate < code_end
+            && module_candidate < wasm_len;
+        let relative_in_code = dwarf_address < code_len
+            && relative_candidate
+                .map(|candidate| candidate >= code_start && candidate < code_end)
+                .unwrap_or(false);
+
+        match (module_in_code, relative_in_code) {
+            (true, true) => (module_candidate, relative_candidate),
+            (true, false) => (module_candidate, None),
+            (false, true) => (relative_candidate.unwrap_or(module_candidate), None),
+            (false, false) => {
+                if module_candidate < wasm_len {
+                    (module_candidate, None)
+                } else if let Some(relative_candidate) = relative_candidate {
+                    (relative_candidate, None)
+                } else {
+                    (dwarf_address, None)
+                }
+            }
         }
-
-        // Otherwise, treat addresses within the code-section payload length as relative.
-        if dwarf_address < code_len {
-            return code_start.saturating_add(dwarf_address);
-        }
-
-        dwarf_address
     }
 
     fn get_file_path(
@@ -461,6 +531,21 @@ impl SourceMap {
         self.last_wasm_hash = None;
     }
 
+    /// Checks if the given exported function name has any source mappings.
+    pub fn function_has_source_mapped(&self, wasm_bytes: &[u8], exported_function: &str) -> bool {
+        let Ok(wasm_index) = WasmIndex::parse(wasm_bytes) else {
+            return false;
+        };
+        let Some(func_idx) = wasm_index.function_index_for_export(exported_function) else {
+            return false;
+        };
+        let bodies = &wasm_index.function_bodies;
+        let Some((range, _)) = bodies.iter().find(|(_, idx)| *idx == func_idx) else {
+            return false;
+        };
+        self.offsets.range(range.clone()).next().is_some()
+    }
+
     /// Resolve source breakpoints for a source file into exported contract functions using DWARF line mappings.
     ///
     /// This relies on:
@@ -474,8 +559,9 @@ impl SourceMap {
         source_path: &Path,
         requested_lines: &[u32],
         exported_functions: &HashSet<String>,
+        max_forward: Option<u32>,
     ) -> Vec<SourceBreakpointResolution> {
-        const MAX_FORWARD_LINE_ADJUST: u32 = 20;
+        let max_forward = max_forward.unwrap_or(20);
 
         if requested_lines.is_empty() {
             return Vec::new();
@@ -516,6 +602,12 @@ impl SourceMap {
         };
 
         let requested_norm = normalize_path_for_match(source_path);
+        let filename_ambiguous = is_filename_ambiguous(
+            self.offsets
+                .values()
+                .map(|loc| normalize_path_for_match(&loc.file)),
+            &requested_norm,
+        );
         let mut line_to_offsets: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
         let mut file_match_count = 0usize;
 
@@ -525,7 +617,11 @@ impl SourceMap {
                 continue;
             }
 
-            if !paths_match_normalized(&normalize_path_for_match(&loc.file), &requested_norm) {
+            if !paths_match_normalized(
+                &normalize_path_for_match(&loc.file),
+                &requested_norm,
+                filename_ambiguous,
+            ) {
                 continue;
             }
 
@@ -577,7 +673,7 @@ impl SourceMap {
                     if let Some((next_line, offsets)) =
                         line_to_offsets.range(*requested_line..).next()
                     {
-                        if next_line.saturating_sub(*requested_line) <= MAX_FORWARD_LINE_ADJUST {
+                        if next_line.saturating_sub(*requested_line) <= max_forward {
                             found = Some((*next_line, offsets));
                         }
                     }
@@ -844,7 +940,7 @@ fn normalize_path_for_match(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
-fn paths_match_normalized(a: &str, b: &str) -> bool {
+fn paths_match_normalized(a: &str, b: &str, filename_ambiguous: bool) -> bool {
     if a == b {
         return true;
     }
@@ -855,7 +951,53 @@ fn paths_match_normalized(a: &str, b: &str) -> bool {
 
     let a_file = a.rsplit('/').next().unwrap_or(a);
     let b_file = b.rsplit('/').next().unwrap_or(b);
-    a_file == b_file
+    if a_file != b_file {
+        return false;
+    }
+
+    if !filename_ambiguous {
+        return true;
+    }
+
+    let a_components = a.split('/').filter(|part| !part.is_empty()).count();
+    let b_components = b.split('/').filter(|part| !part.is_empty()).count();
+    let components_to_match = a_components.min(b_components);
+
+    if components_to_match < 2 {
+        return false;
+    }
+
+    suffix_components_match(a, b, components_to_match)
+}
+
+fn suffix_components_match(a: &str, b: &str, components: usize) -> bool {
+    let a_parts: Vec<&str> = a.split('/').filter(|part| !part.is_empty()).collect();
+    let b_parts: Vec<&str> = b.split('/').filter(|part| !part.is_empty()).collect();
+    if a_parts.len() < components || b_parts.len() < components {
+        return false;
+    }
+
+    a_parts[a_parts.len() - components..] == b_parts[b_parts.len() - components..]
+}
+
+fn is_filename_ambiguous<I>(paths: I, requested: &str) -> bool
+where
+    I: Iterator<Item = String>,
+{
+    let requested_file = requested.rsplit('/').next().unwrap_or(requested);
+    let mut matching_paths: HashSet<String> = HashSet::new();
+
+    for path in paths {
+        let file = path.rsplit('/').next().unwrap_or(&path);
+        if file == requested_file {
+            matching_paths.insert(path);
+            if matching_paths.len() > 1 {
+                return true;
+            }
+        }
+    }
+
+    false
 }
 
 #[cfg(test)]
@@ -920,6 +1062,82 @@ mod tests {
         bytes.extend_from_slice(&uleb128(section.len()));
         bytes.extend_from_slice(&section);
         bytes
+    }
+
+    fn push_section(bytes: &mut Vec<u8>, section_id: u8, payload: &[u8]) {
+        bytes.push(section_id);
+        bytes.extend_from_slice(&uleb128(payload.len()));
+        bytes.extend_from_slice(payload);
+    }
+
+    fn wasm_with_functions_and_exports(exports: &[(&str, u32)], function_count: u32) -> Vec<u8> {
+        let mut bytes = vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
+
+        let type_section = vec![0x01, 0x60, 0x00, 0x00];
+        push_section(&mut bytes, 0x01, &type_section);
+
+        let mut function_section = Vec::new();
+        function_section.extend_from_slice(&uleb128(function_count as usize));
+        function_section.extend(std::iter::repeat_n(0x00, function_count as usize));
+        push_section(&mut bytes, 0x03, &function_section);
+
+        if !exports.is_empty() {
+            let mut export_section = Vec::new();
+            export_section.extend_from_slice(&uleb128(exports.len()));
+            for (name, function_index) in exports {
+                export_section.extend_from_slice(&uleb128(name.len()));
+                export_section.extend_from_slice(name.as_bytes());
+                export_section.push(0x00);
+                export_section.extend_from_slice(&uleb128(*function_index as usize));
+            }
+            push_section(&mut bytes, 0x07, &export_section);
+        }
+
+        let mut code_section = Vec::new();
+        code_section.extend_from_slice(&uleb128(function_count as usize));
+        for _ in 0..function_count {
+            code_section.push(0x02);
+            code_section.push(0x00);
+            code_section.push(0x0b);
+        }
+        push_section(&mut bytes, 0x0a, &code_section);
+
+        bytes
+    }
+
+    #[test]
+    fn normalize_wasm_offsets_keeps_alternate_for_ambiguous_addresses() {
+        let sm = SourceMap {
+            code_section_range: Some(100..400),
+            ..SourceMap::new()
+        };
+
+        let (primary, alternate) = sm.normalize_wasm_offsets(150, 500);
+
+        assert_eq!(primary, 150);
+        assert_eq!(alternate, Some(250));
+    }
+
+    #[test]
+    fn ambiguous_addresses_resolve_for_both_coordinate_spaces() {
+        let mut sm = SourceMap {
+            code_section_range: Some(100..400),
+            ..SourceMap::new()
+        };
+        let location = SourceLocation {
+            file: PathBuf::from("lib.rs"),
+            line: 9,
+            column: Some(1),
+        };
+
+        let (primary, alternate) = sm.normalize_wasm_offsets(150, 500);
+        sm.offsets.insert(primary, location.clone());
+        if let Some(alternate) = alternate {
+            sm.offsets.entry(alternate).or_insert(location.clone());
+        }
+
+        assert_eq!(sm.lookup(150), Some(location.clone()));
+        assert_eq!(sm.lookup(250), Some(location));
     }
 
     #[test]
@@ -1058,6 +1276,117 @@ mod tests {
         assert!(
             sm.lookup(42).is_none(),
             "stale mappings must be cleared on cache miss"
+        );
+    }
+
+    #[test]
+    fn resolve_source_breakpoints_reports_not_exported_for_private_function() {
+        let wasm = wasm_with_functions_and_exports(&[("entrypoint", 0)], 2);
+        let index = WasmIndex::parse(&wasm).unwrap();
+        let private_offset = index.function_bodies[1].0.start;
+        let source_path = PathBuf::from("contract.rs");
+
+        let mut sm = SourceMap::new();
+        sm.add_mapping(
+            private_offset,
+            SourceLocation {
+                file: source_path.clone(),
+                line: 7,
+                column: None,
+            },
+        );
+
+        let exported_functions = HashSet::from([String::from("entrypoint")]);
+        let resolved =
+            sm.resolve_source_breakpoints(&wasm, &source_path, &[7], &exported_functions, None);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].requested_line, 7);
+        assert_eq!(resolved[0].line, 7);
+        assert!(!resolved[0].verified);
+        assert_eq!(resolved[0].function, None);
+        assert_eq!(resolved[0].reason_code, "NOT_EXPORTED");
+        assert!(resolved[0].message.contains("[NOT_EXPORTED]"));
+        assert!(resolved[0].message.contains("[1]"));
+    }
+
+    #[test]
+    fn resolve_source_breakpoints_reports_ambiguous_for_multiple_entrypoints() {
+        let wasm = wasm_with_functions_and_exports(&[("alpha", 0), ("beta", 1)], 2);
+        let index = WasmIndex::parse(&wasm).unwrap();
+        let alpha_offset = index.function_bodies[0].0.start;
+        let beta_offset = index.function_bodies[1].0.start;
+        let source_path = PathBuf::from("contract.rs");
+
+        let mut sm = SourceMap::new();
+        sm.add_mapping(
+            alpha_offset,
+            SourceLocation {
+                file: source_path.clone(),
+                line: 10,
+                column: None,
+            },
+        );
+        sm.add_mapping(
+            beta_offset,
+            SourceLocation {
+                file: source_path.clone(),
+                line: 10,
+                column: None,
+            },
+        );
+
+        let exported_functions = HashSet::from([String::from("alpha"), String::from("beta")]);
+        let resolved =
+            sm.resolve_source_breakpoints(&wasm, &source_path, &[10], &exported_functions, None);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].requested_line, 10);
+        assert_eq!(resolved[0].line, 10);
+        assert!(!resolved[0].verified);
+        assert_eq!(resolved[0].function, None);
+        assert_eq!(resolved[0].reason_code, "AMBIGUOUS");
+        assert!(resolved[0].message.contains("[AMBIGUOUS]"));
+        assert!(resolved[0].message.contains("alpha"));
+        assert!(resolved[0].message.contains("beta"));
+    }
+
+    #[test]
+    fn resolve_source_breakpoints_disambiguates_same_filename_by_parent_directory() {
+        let wasm = wasm_with_functions_and_exports(&[("alpha", 0), ("beta", 1)], 2);
+        let index = WasmIndex::parse(&wasm).unwrap();
+        let alpha_offset = index.function_bodies[0].0.start;
+        let beta_offset = index.function_bodies[1].0.start;
+
+        let mut sm = SourceMap::new();
+        sm.add_mapping(
+            alpha_offset,
+            SourceLocation {
+                file: PathBuf::from("/workspace/crate_a/src/lib.rs"),
+                line: 10,
+                column: None,
+            },
+        );
+        sm.add_mapping(
+            beta_offset,
+            SourceLocation {
+                file: PathBuf::from("/workspace/crate_b/src/lib.rs"),
+                line: 10,
+                column: None,
+            },
+        );
+
+        let exported_functions = HashSet::from([String::from("alpha"), String::from("beta")]);
+        let requested_path = PathBuf::from("crate_a/src/lib.rs");
+        let resolved =
+            sm.resolve_source_breakpoints(&wasm, &requested_path, &[10], &exported_functions, None);
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].function.as_deref(), Some("alpha"));
+        assert!(
+            resolved[0].reason_code == "OK" || resolved[0].reason_code.starts_with("HEURISTIC"),
+            "unexpected reason code: {}",
+            resolved[0].reason_code
         );
     }
 }

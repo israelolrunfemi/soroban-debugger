@@ -23,6 +23,11 @@ pub struct DebugConfig {
     /// Default verbosity level (0-3)
     #[serde(default)]
     pub verbosity: Option<u8>,
+    /// Maximum forward line adjustment for source breakpoints.
+    /// If a breakpoint is set on a non-executable line, the debugger will search
+    /// up to this many lines forward for the nearest executable instruction.
+    #[serde(default)]
+    pub max_forward_line_adjust: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -33,6 +38,9 @@ pub struct OutputConfig {
     /// Show events by default
     #[serde(default)]
     pub show_events: Option<bool>,
+    /// Path to the analyzer suppressions TOML file
+    #[serde(default)]
+    pub suppressions_file: Option<String>,
 }
 
 impl Config {

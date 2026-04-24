@@ -41,6 +41,15 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Export format for profiler output (issue #502).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum ProfileExportFormat {
+    #[default]
+    Report,
+    FoldedStack,
+    Json,
+}
+
 /// Format for dependency graph output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum GraphFormat {
@@ -143,56 +152,80 @@ impl Cli {
 #[derive(Subcommand)]
 #[allow(clippy::large_enum_variant)]
 pub enum Commands {
-    /// Run a contract function with the debugger
+    // --- Run and Debug ---
+    /// Execute a contract function with the debugger
+    #[command(subcommand_help_heading = "Run and Debug")]
     Run(RunArgs),
 
     /// Start an interactive debugging session
+    #[command(subcommand_help_heading = "Run and Debug")]
     Interactive(InteractiveArgs),
 
     /// Start an interactive REPL for contract exploration
+    #[command(subcommand_help_heading = "Run and Debug")]
     Repl(ReplArgs),
 
     /// Launch the full-screen TUI dashboard
+    #[command(subcommand_help_heading = "Run and Debug")]
     Tui(TuiArgs),
 
+    /// Run a multi-step scenario from a TOML file
+    #[command(subcommand_help_heading = "Run and Debug")]
+    Scenario(ScenarioArgs),
+
+    /// Replay execution from a previously exported trace file
+    #[command(subcommand_help_heading = "Run and Debug")]
+    Replay(ReplayArgs),
+
+    // --- Analyze and Compare ---
     /// Inspect contract information without executing
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Inspect(InspectArgs),
 
     /// Check compatibility between two contract versions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     UpgradeCheck(UpgradeCheckArgs),
 
-    /// Generate shell completion scripts
-    Completions(CompletionsArgs),
-
     /// Analyze contract and generate gas optimization suggestions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Optimize(OptimizeArgs),
 
     /// Profile a single function execution and print hotspots + suggestions
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Profile(ProfileArgs),
 
     /// Compare two execution trace JSON files side-by-side
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Compare(CompareArgs),
 
-    /// Replay execution from a previously exported trace file
-    Replay(ReplayArgs),
-
     /// Run symbolic execution to explore contract input space
+    #[command(subcommand_help_heading = "Analyze and Compare")]
     Symbolic(SymbolicArgs),
 
+    /// Analyze contract for security vulnerabilities
+    #[command(subcommand_help_heading = "Analyze and Compare")]
+    Analyze(AnalyzeArgs),
+
+    // --- Remote and Server ---
     /// Start debug server for remote connections
+    #[command(subcommand_help_heading = "Remote and Server")]
     Server(ServerArgs),
 
     /// Connect to remote debug server
+    #[command(subcommand_help_heading = "Remote and Server")]
     Remote(RemoteArgs),
 
-    /// Analyze contract for security vulnerabilities
-    Analyze(AnalyzeArgs),
-
-    /// Run a multi-step scenario from a TOML file
-    Scenario(ScenarioArgs),
+    // --- Developer Utilities ---
+    /// Generate shell completion scripts
+    #[command(subcommand_help_heading = "Developer Utilities")]
+    Completions(CompletionsArgs),
 
     /// Prune or compact run history according to a retention policy
+    #[command(subcommand_help_heading = "Developer Utilities")]
     HistoryPrune(HistoryPruneArgs),
+
+    /// Report runtime health and diagnostics for troubleshooting
+    Doctor(DoctorArgs),
 
     /// Plugin-provided subcommand (loaded at runtime)
     #[command(external_subcommand)]
@@ -256,6 +289,10 @@ pub struct RunArgs {
     /// Port to listen on or connect to
     #[arg(short, long, default_value = "9229")]
     pub port: u16,
+
+    /// Host/interface to bind when using --server
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
 
     /// Connect to a remote debugger (address:port)
     #[arg(long)]
@@ -371,9 +408,14 @@ pub struct RunArgs {
     #[arg(long, default_value = "1000")]
     pub ttl_warning_threshold: u32,
 
-    /// Export execution trace to JSON file
+    /// Export execution trace to JSON file and emit a replay manifest sidecar
     #[arg(long)]
     pub trace_output: Option<PathBuf>,
+
+    /// Export a compact timeline narrative (pause points + key deltas) to JSON file
+    #[arg(long, value_name = "FILE")]
+    pub timeline_output: Option<PathBuf>,
+
     /// Path to file where execution results should be saved
     #[arg(long, value_name = "FILE")]
     pub save_output: Option<PathBuf>,
@@ -572,6 +614,13 @@ pub struct ReplArgs {
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
+
+    /// Filter storage output by key pattern (repeatable). Supports:
+    ///   prefix*       — match keys starting with prefix
+    ///   re:<regex>    — match keys by regex
+    ///   exact_key     — match key exactly
+    #[arg(long, value_name = "PATTERN")]
+    pub watch_keys: Vec<String>,
 }
 
 impl ReplArgs {
@@ -1015,6 +1064,11 @@ pub struct ProfileArgs {
     /// Initial storage state as JSON object
     #[arg(short, long)]
     pub storage: Option<String>,
+
+    /// Export format for profiler output (report|folded-stack|json)
+    #[arg(long, value_enum, default_value_t = ProfileExportFormat::Report)]
+    pub export_format: ProfileExportFormat,
+
     /// Expected SHA-256 hash of the WASM file. If provided, loading will fail if the computed hash does not match.
     #[arg(long)]
     pub expected_hash: Option<String>,
@@ -1033,6 +1087,10 @@ pub struct SymbolicArgs {
     /// Output file for the scenario TOML
     #[arg(short, long)]
     pub output: Option<PathBuf>,
+
+    /// Export a symbolic replay bundle to JSON
+    #[arg(long, value_name = "FILE")]
+    pub export_replay_bundle: Option<PathBuf>,
 
     /// Preset symbolic exploration budget profile
     #[arg(long, value_enum, default_value_t = SymbolicProfile::Balanced)]
@@ -1076,6 +1134,10 @@ pub struct SymbolicArgs {
     /// affect contract behavior. The JSON should be a map of key-value pairs.
     #[arg(long, value_name = "FILE")]
     pub storage_seed: Option<PathBuf>,
+
+    /// Output format for the report (pretty/text or json)
+    #[arg(long, value_enum, default_value_t = OutputFormat::Pretty)]
+    pub format: OutputFormat,
 }
 
 #[derive(Parser)]
@@ -1103,6 +1165,10 @@ pub struct ReplayArgs {
 
 #[derive(Parser)]
 pub struct ServerArgs {
+    /// Host/interface to bind
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Port to listen on
     #[arg(short, long, default_value = "9229")]
     pub port: u16,
@@ -1118,6 +1184,14 @@ pub struct ServerArgs {
     /// TLS private key file path (optional)
     #[arg(long)]
     pub tls_key: Option<PathBuf>,
+
+    /// Repeat execution N times and show throughput/latency stats
+    #[arg(long, value_name = "N")]
+    pub repeat: Option<u32>,
+
+    /// Filter storage view to only show keys matching pattern (repeatable)
+    #[arg(long, value_name = "PATTERN")]
+    pub storage_filter: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -1138,9 +1212,107 @@ pub struct RemoteArgs {
     #[arg(short, long)]
     pub function: Option<String>,
 
+    /// TLS certificate file path (optional)
+    #[arg(long)]
+    pub tls_cert: Option<PathBuf>,
+
+    /// TLS private key file path (optional)
+    #[arg(long)]
+    pub tls_key: Option<PathBuf>,
+
+    /// TLS CA certificate file path (optional, for self-signed certs)
+    #[arg(long)]
+    pub tls_ca: Option<PathBuf>,
+
     /// Function arguments as JSON array
     #[arg(short, long)]
     pub args: Option<String>,
+
+    /// Timeout in milliseconds for the initial TCP connection to the remote server.
+    ///
+    /// Use this when the server is on a slow or restricted network and the default
+    /// connect attempt feels hung or fails unpredictably.  Distinct from
+    /// --timeout-ms, which governs individual request/response round-trips after
+    /// the connection is already established.
+    ///
+    /// Default: 10 000 ms (10 seconds).
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value = "10000",
+        env = "SOROBAN_DEBUG_CONNECT_TIMEOUT_MS"
+    )]
+    pub connect_timeout_ms: u64,
+
+    /// Per-request timeout in milliseconds for regular operations (execute, storage, inspect).
+    ///
+    /// Default: 30 000 ms (30 seconds).
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value = "30000",
+        env = "SOROBAN_DEBUG_REQUEST_TIMEOUT_MS"
+    )]
+    pub timeout_ms: u64,
+
+    /// Per-request timeout in milliseconds specifically for Inspect calls.
+    ///
+    /// Inspect fetches execution state metadata and can be slower than a simple ping.
+    /// Defaults to --timeout-ms when not provided.
+    #[arg(long, value_name = "MS", env = "SOROBAN_DEBUG_INSPECT_TIMEOUT_MS")]
+    pub inspect_timeout_ms: Option<u64>,
+
+    /// Per-request timeout in milliseconds specifically for GetStorage calls.
+    ///
+    /// Storage fetches can be large; set this higher than --timeout-ms for contracts
+    /// with many storage keys.  Defaults to --timeout-ms when not provided.
+    #[arg(long, value_name = "MS", env = "SOROBAN_DEBUG_STORAGE_TIMEOUT_MS")]
+    pub storage_timeout_ms: Option<u64>,
+
+    /// Maximum number of retry attempts for idempotent requests (ping, inspect, storage).
+    ///
+    /// Default: 3.
+    #[arg(long, value_name = "N", default_value = "3")]
+    pub retry_attempts: usize,
+
+    /// Base delay in milliseconds between retry attempts (exponential back-off).
+    ///
+    /// Default: 200 ms.
+    #[arg(long, value_name = "MS", default_value = "200")]
+    pub retry_base_delay_ms: u64,
+
+    /// Maximum delay in milliseconds between retry attempts.
+    ///
+    /// Default: 2 000 ms.
+    #[arg(long, value_name = "MS", default_value = "2000")]
+    pub retry_max_delay_ms: u64,
+
+    /// Remote operation to perform (default: execute or ping)
+    #[command(subcommand)]
+    pub action: Option<RemoteAction>,
+}
+
+#[derive(Subcommand)]
+pub enum RemoteAction {
+    /// Inspect current execution state (function, step count, call stack)
+    Inspect,
+
+    /// Get contract storage state as JSON
+    Storage,
+
+    /// Evaluate an expression in the current debug context
+    Evaluate(RemoteEvaluateArgs),
+}
+
+#[derive(Parser)]
+pub struct RemoteEvaluateArgs {
+    /// Expression to evaluate
+    #[arg(short, long)]
+    pub expression: String,
+
+    /// Stack frame ID for evaluation context (optional)
+    #[arg(long)]
+    pub frame_id: Option<u64>,
 }
 
 #[derive(Parser)]
@@ -1200,4 +1372,28 @@ pub struct ScenarioArgs {
     /// Use 0 to disable the timeout entirely.
     #[arg(long)]
     pub timeout: Option<u64>,
+}
+
+/// Arguments for the doctor/health command
+#[derive(Parser)]
+pub struct DoctorArgs {
+    /// Output format (pretty, json)
+    #[arg(long, value_enum, default_value = "pretty")]
+    pub format: OutputFormat,
+
+    /// Optional remote debug server to probe (e.g., localhost:9229)
+    #[arg(long)]
+    pub remote: Option<String>,
+
+    /// Authentication token for remote probe (if required by server)
+    #[arg(long)]
+    pub token: Option<String>,
+
+    /// Timeout for remote checks in milliseconds
+    #[arg(long, default_value = "3000")]
+    pub timeout_ms: u64,
+
+    /// Optional path to a VS Code extension `package.json` to report version hints
+    #[arg(long, value_name = "FILE")]
+    pub vscode_manifest: Option<PathBuf>,
 }

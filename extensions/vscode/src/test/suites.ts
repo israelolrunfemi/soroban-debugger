@@ -1,18 +1,18 @@
 import * as assert from "assert";
-import { ChildProcess, spawn } from "child_process";
+import { spawn } from "child_process";
 import * as fs from "fs";
 import * as net from "net";
 import * as path from "path";
 import {
   DebuggerProcess,
+  DebuggerTimeoutError,
+  formatProtocolMismatchMessage,
   getDebuggerVersionInfo,
   validateLaunchConfig,
-  formatProtocolMismatchMessage,
-  DebuggerTimeoutError
-} from '../cli/debuggerProcess';
-import { resolveSourceBreakpoints } from '../dap/sourceBreakpoints';
-import { VariableStore } from '../dap/variableStore';
-import { DapClient } from './dapClient';
+} from "../cli/debuggerProcess";
+import { resolveSourceBreakpoints, shouldPromoteToFunctionBreakpoint } from "../dap/sourceBreakpoints";
+import { VariableStore } from "../dap/variableStore";
+import { DapClient } from "./dapClient";
 
 type DebugMessage = {
   id: number;
@@ -27,6 +27,12 @@ type TestFixtures = {
   sourcePath: string;
   binaryPath: string;
 };
+
+const BREAKPOINT_SYNC_TEST_LOG_ENV = "SOROBAN_DEBUG_BREAKPOINT_SYNC_TEST_LOG";
+const FIXTURE_BREAKPOINT_MARKERS = {
+  nonExportedHelper: "BREAKPOINT_MARKER: non-exported-helper",
+  exportedEcho: "BREAKPOINT_MARKER: exported-echo",
+} as const;
 
 async function startMockDebuggerServer(options: {
   evaluateDelayMs: number;
@@ -78,17 +84,17 @@ async function startMockDebuggerServer(options: {
               selected_version: 1,
             });
             break;
-          case 'Authenticate':
-            respond({ type: 'Authenticated', success: true, message: 'ok' });
+          case "Authenticate":
+            respond({ type: "Authenticated", success: true, message: "ok" });
             break;
           case "LoadSnapshot":
             respond({ type: "SnapshotLoaded", summary: "ok" });
             break;
-          case 'LoadContract':
-            respond({ type: 'ContractLoaded', size: 0 });
+          case "LoadContract":
+            respond({ type: "ContractLoaded", size: 0 });
             break;
-          case 'Ping':
-            respond({ type: 'Pong' });
+          case "Ping":
+            respond({ type: "Pong" });
             break;
           case "Evaluate":
             respond(
@@ -164,13 +170,63 @@ async function wait(ms: number): Promise<void> {
   await new Promise<void>((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitForProcessLog(
+  getOutput: () => string,
+  pattern: RegExp,
+  timeoutMs = 5_000,
+): Promise<string> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const output = getOutput();
+    if (pattern.test(output)) {
+      return output;
+    }
+    await wait(25);
+  }
+
+  throw new Error(`Timed out waiting for process log matching ${pattern}`);
+}
+
+async function assertProcessLogAbsent(
+  getOutput: () => string,
+  pattern: RegExp,
+  waitMs = 500,
+): Promise<void> {
+  await wait(waitMs);
+  assert.doesNotMatch(
+    getOutput(),
+    pattern,
+    `Did not expect process log matching ${pattern}`,
+  );
+}
+
 function resolveFixtures(): TestFixtures {
   const extensionRoot = process.cwd();
-  const repoRoot = path.resolve(extensionRoot, '..', '..');
-  const contractPath = path.join(repoRoot, 'tests', 'fixtures', 'wasm', 'echo.wasm');
-  const sourcePath = path.join(repoRoot, 'tests', 'fixtures', 'contracts', 'echo', 'src', 'lib.rs');
-  const binaryPath = process.env.SOROBAN_DEBUG_BIN
-    || path.join(repoRoot, 'target', 'debug', process.platform === 'win32' ? 'soroban-debug.exe' : 'soroban-debug');
+  const repoRoot = path.resolve(extensionRoot, "..", "..");
+  const contractPath = path.join(
+    repoRoot,
+    "tests",
+    "fixtures",
+    "wasm",
+    "echo.wasm",
+  );
+  const sourcePath = path.join(
+    repoRoot,
+    "tests",
+    "fixtures",
+    "contracts",
+    "echo",
+    "src",
+    "lib.rs",
+  );
+  const binaryPath =
+    process.env.SOROBAN_DEBUG_BIN ||
+    path.join(
+      repoRoot,
+      "target",
+      "debug",
+      process.platform === "win32" ? "soroban-debug.exe" : "soroban-debug",
+    );
 
   return {
     extensionRoot,
@@ -179,6 +235,17 @@ function resolveFixtures(): TestFixtures {
     sourcePath,
     binaryPath,
   };
+}
+
+function findFixtureLine(sourcePath: string, marker: string): number {
+  const lines = fs.readFileSync(sourcePath, "utf8").split(/\r?\n/);
+  const lineNumber = lines.findIndex((line) => line.includes(marker)) + 1;
+  assert.notEqual(
+    lineNumber,
+    0,
+    `Expected fixture marker '${marker}' in ${sourcePath}`,
+  );
+  return lineNumber;
 }
 
 export async function runSmokeSuite(): Promise<void> {
@@ -213,6 +280,34 @@ export async function runSmokeSuite(): Promise<void> {
     /Remediation:/,
     "Expected protocol mismatch message to include remediation guidance",
   );
+
+  {
+    // Validate identical promotion logic for identical inputs
+    const testCases: Array<{
+      verified: boolean;
+      functionName?: string;
+      reasonCode?: string;
+      expected: boolean;
+    }> = [
+      { verified: true, functionName: "test", expected: true },
+      { verified: true, functionName: undefined, expected: false },
+      { verified: false, functionName: "test", expected: false },
+      { verified: false, functionName: "test", reasonCode: "HEURISTIC_NOT_EXPORTED", expected: false },
+      { verified: false, functionName: "test", reasonCode: "HEURISTIC_REANCHORED", expected: true },
+      { verified: false, functionName: "test", reasonCode: "HEURISTIC_NO_DWARF", expected: true },
+      { verified: false, functionName: undefined, reasonCode: "HEURISTIC_NO_FUNCTION", expected: false },
+    ];
+
+    for (const testCase of testCases) {
+      const result = shouldPromoteToFunctionBreakpoint(testCase.verified, testCase.functionName, testCase.reasonCode);
+      assert.strictEqual(
+        result,
+        testCase.expected,
+        `Expected shouldPromoteToFunctionBreakpoint(${testCase.verified}, '${testCase.functionName}', '${testCase.reasonCode}') to be ${testCase.expected}`,
+      );
+    }
+    console.log("Breakpoint promotion identical decision unit tests passed");
+  }
 
   await assertPerRequestTimeoutBehavior();
 
@@ -318,7 +413,10 @@ export async function runSmokeSuite(): Promise<void> {
       signal: controller.signal,
     });
     setTimeout(() => controller.abort(), 10);
-    await assert.rejects(evaluatePromise, (error: any) => error?.name === 'AbortError');
+    await assert.rejects(
+      evaluatePromise,
+      (error: any) => error?.name === "AbortError",
+    );
 
     await wait(250);
     assert.equal(
@@ -327,7 +425,9 @@ export async function runSmokeSuite(): Promise<void> {
     );
     await debuggerProcess.ping();
 
-    const timedOut = debuggerProcess.evaluate('2', undefined, { timeoutMs: 20 });
+    const timedOut = debuggerProcess.evaluate("2", undefined, {
+      timeoutMs: 20,
+    });
     await assert.rejects(
       timedOut,
       (error: any) => error instanceof DebuggerTimeoutError,
@@ -437,6 +537,98 @@ export async function runSmokeSuite(): Promise<void> {
   assert.equal(badToken.ok, false, "Expected blank token to fail preflight");
   assert.equal(badToken.issues[0].field, "token");
 
+  const missingTlsCert = await validateLaunchConfig({
+    binaryPath: preflightBinaryPath,
+    contractPath: fixtures.contractPath,
+    entrypoint: "echo",
+    args: [],
+    tlsKey: snapshotPath,
+  });
+  assert.equal(
+    missingTlsCert.ok,
+    false,
+    "Expected missing tlsCert to fail preflight when tlsKey is set",
+  );
+  assert.equal(missingTlsCert.issues[0].field, "tlsCert");
+
+  const missingTlsKey = await validateLaunchConfig({
+    binaryPath: preflightBinaryPath,
+    contractPath: fixtures.contractPath,
+    entrypoint: "echo",
+    args: [],
+    tlsCert: snapshotPath,
+  });
+  assert.equal(
+    missingTlsKey.ok,
+    false,
+    "Expected missing tlsKey to fail preflight when tlsCert is set",
+  );
+  assert.equal(missingTlsKey.issues[0].field, "tlsKey");
+
+  // --- Attach mode preflight tests ---
+
+  // attach with valid host + port (port must be in use, so we spin up a mock)
+  const attachMock = await startMockDebuggerServer({ evaluateDelayMs: 0 });
+  const goodAttach = await validateLaunchConfig({
+    binaryPath: preflightBinaryPath,
+    contractPath: fixtures.contractPath,
+    entrypoint: "echo",
+    args: [],
+    host: "127.0.0.1",
+    port: attachMock.port,
+    spawnServer: false,
+  });
+  await attachMock.close();
+  assert.equal(
+    goodAttach.ok,
+    true,
+    "Expected valid attach config to pass preflight",
+  );
+
+  // attach with blank host should fail
+  const badHost = await validateLaunchConfig({
+    binaryPath: preflightBinaryPath,
+    contractPath: fixtures.contractPath,
+    entrypoint: "echo",
+    args: [],
+    host: "   ",
+    port: 2345,
+    spawnServer: false,
+  });
+  assert.equal(badHost.ok, false, "Expected blank host to fail preflight");
+  assert.equal(badHost.issues[0].field, "host");
+
+  // --- Attach mode connect tests ---
+
+  // success: attach to a running mock server
+  const attachSuccessMock = await startMockDebuggerServer({ evaluateDelayMs: 0 });
+  const attachProcess = new DebuggerProcess({
+    contractPath: "mock.wasm",
+    host: "127.0.0.1",
+    port: attachSuccessMock.port,
+    spawnServer: false,
+  });
+  await attachProcess.start();
+  await attachProcess.ping();
+  await attachProcess.stop();
+  await attachSuccessMock.close();
+  console.log("Attach mode success test passed");
+
+  // failure: attach to a port with nothing listening
+  const noServerProcess = new DebuggerProcess({
+    contractPath: "mock.wasm",
+    host: "127.0.0.1",
+    port: 19999,
+    spawnServer: false,
+    connectTimeoutMs: 500,
+  });
+  await assert.rejects(
+    noServerProcess.start(),
+    (err: unknown) => err instanceof Error,
+    "Expected attach to unreachable port to reject",
+  );
+  console.log("Attach mode failure test passed");
+
   if (!fs.existsSync(fixtures.binaryPath)) {
     console.log(
       `Skipping debugger smoke test because the CLI binary was not found at ${fixtures.binaryPath}`,
@@ -454,10 +646,18 @@ export async function runSmokeSuite(): Promise<void> {
   await debuggerProcess.start();
   await debuggerProcess.ping();
 
+  const exportedEchoLine = findFixtureLine(
+    fixtures.sourcePath,
+    FIXTURE_BREAKPOINT_MARKERS.exportedEcho,
+  );
+  const nonExportedHelperLine = findFixtureLine(
+    fixtures.sourcePath,
+    FIXTURE_BREAKPOINT_MARKERS.nonExportedHelper,
+  );
   const exportedFunctions = await debuggerProcess.getContractFunctions();
   const resolvedBreakpoints = resolveSourceBreakpoints(
     fixtures.sourcePath,
-    [10],
+    [exportedEchoLine],
     exportedFunctions,
   );
   assert.equal(
@@ -471,6 +671,63 @@ export async function runSmokeSuite(): Promise<void> {
     true,
     "Expected heuristic mapping to still set a function breakpoint",
   );
+
+  const nonExportedBreakpoints = resolveSourceBreakpoints(
+    fixtures.sourcePath,
+    [nonExportedHelperLine],
+    exportedFunctions,
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].verified,
+    false,
+    "Expected non-exported function mapping to be unverified",
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].functionName,
+    "helper",
+    "Expected non-exported function line to map to helper",
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].reasonCode,
+    "HEURISTIC_NOT_EXPORTED",
+    "Expected non-exported function reason code",
+  );
+  assert.equal(
+    nonExportedBreakpoints[0].setBreakpoint,
+    false,
+    "Expected non-exported function mapping to skip runtime breakpoint install",
+  );
+
+  // Test HEURISTIC_NO_FUNCTION behavior for lines outside any function
+  const noFunctionBreakpoints = resolveSourceBreakpoints(
+    fixtures.sourcePath,
+    [1, 2, 13, 18], // Lines outside any function in lib.rs
+    exportedFunctions,
+  );
+
+  for (let i = 0; i < noFunctionBreakpoints.length; i++) {
+    const bp = noFunctionBreakpoints[i];
+    assert.equal(
+      bp.verified,
+      false,
+      `Expected line ${bp.requestedLine} to be unverified`,
+    );
+    assert.equal(
+      bp.reasonCode,
+      "HEURISTIC_NO_FUNCTION",
+      `Expected line ${bp.requestedLine} to have HEURISTIC_NO_FUNCTION reason code`,
+    );
+    assert.equal(
+      bp.setBreakpoint,
+      false,
+      `Expected line ${bp.requestedLine} to not set runtime breakpoint`,
+    );
+    assert.equal(
+      bp.message,
+      "Line is not inside a detectable Rust function",
+      `Expected line ${bp.requestedLine} to have clear diagnostic message`,
+    );
+  }
 
   await debuggerProcess.setBreakpoint({
     id: "echo",
@@ -620,9 +877,15 @@ async function runDapHappyPathE2E(
   fixtures: Pick<TestFixtures, "contractPath" | "sourcePath" | "binaryPath">,
 ): Promise<void> {
   const proc = spawn(process.execPath, [debugAdapterPath], {
+    env: { ...process.env, [BREAKPOINT_SYNC_TEST_LOG_ENV]: "1" },
     stdio: ["pipe", "pipe", "pipe"],
   });
   const client = new DapClient(proc);
+  let stderrOutput = "";
+  proc.stderr.setEncoding("utf8");
+  proc.stderr.on("data", (chunk: string) => {
+    stderrOutput += chunk;
+  });
 
   try {
     const init = await client.request("initialize", {
@@ -660,7 +923,14 @@ async function runDapHappyPathE2E(
 
     const setBps = await client.request("setBreakpoints", {
       source: { path: fixtures.sourcePath },
-      breakpoints: [{ line: 10 }],
+      breakpoints: [
+        {
+          line: findFixtureLine(
+            fixtures.sourcePath,
+            FIXTURE_BREAKPOINT_MARKERS.exportedEcho,
+          ),
+        },
+      ],
     });
     assert.equal(
       setBps.success,
@@ -671,6 +941,75 @@ async function runDapHappyPathE2E(
       setBps.body?.breakpoints?.[0]?.verified,
       false,
       "Expected heuristic source mapping to be unverified",
+    );
+    assert.equal(
+      setBps.body?.breakpoints?.[0]?.reasonCode,
+      "HEURISTIC_NO_DWARF",
+      "Expected heuristic reason code on source breakpoint response",
+    );
+    assert.match(
+      String(setBps.body?.breakpoints?.[0]?.message || ""),
+      /HEURISTIC_NO_DWARF/,
+      "Expected breakpoint message to include heuristic reason code",
+    );
+    const breakpointSyncLog = await waitForProcessLog(
+      () => stderrOutput,
+      /BREAKPOINT_SYNC_TEST .*"action":"set".*"functionName":"echo".*"success":true/,
+    );
+    assert.match(
+      breakpointSyncLog,
+      /BREAKPOINT_SYNC_TEST/,
+      "Expected adapter test log to confirm runtime breakpoint installation",
+    );
+
+    const privateBps = await client.request("setBreakpoints", {
+      source: { path: fixtures.sourcePath },
+      breakpoints: [
+        {
+          line: findFixtureLine(
+            fixtures.sourcePath,
+            FIXTURE_BREAKPOINT_MARKERS.exportedEcho,
+          ),
+        },
+        {
+          line: findFixtureLine(
+            fixtures.sourcePath,
+            FIXTURE_BREAKPOINT_MARKERS.nonExportedHelper,
+          ),
+        },
+      ],
+    });
+    const helperLine = findFixtureLine(
+      fixtures.sourcePath,
+      FIXTURE_BREAKPOINT_MARKERS.nonExportedHelper,
+    );
+    const helperBp = privateBps.body?.breakpoints?.find(
+      (bp: { line?: number }) => bp.line === helperLine,
+    );
+    assert.equal(
+      privateBps.success,
+      true,
+      `setBreakpoints for non-exported function failed: ${privateBps.message || ""}`,
+    );
+    assert.ok(helperBp, "Expected helper breakpoint to be present in response");
+    assert.equal(
+      helperBp?.verified,
+      false,
+      "Expected non-exported function source mapping to be unverified",
+    );
+    assert.equal(
+      helperBp?.reasonCode,
+      "HEURISTIC_NOT_EXPORTED",
+      "Expected non-exported reason code on source breakpoint response",
+    );
+    assert.match(
+      String(helperBp?.message || ""),
+      /HEURISTIC_NOT_EXPORTED/,
+      "Expected non-exported breakpoint message to include reason code",
+    );
+    await assertProcessLogAbsent(
+      () => stderrOutput,
+      /BREAKPOINT_SYNC_TEST .*"action":"set".*"functionName":"helper".*"success":true/,
     );
 
     const configDone = await client.request("configurationDone", {});
@@ -685,10 +1024,20 @@ async function runDapHappyPathE2E(
     const cont = await client.request("continue", { threadId: 1 }, 30_000);
     assert.equal(cont.success, true, `continue failed: ${cont.message || ""}`);
 
-    await client.waitForEvent(
-      "stopped",
-      (e) => e.body?.reason === "breakpoint",
+    const firstEventAfterContinue = await client.waitForAnyEvent(
+      ["stopped", "exited"],
+      () => true,
       30_000,
+    );
+    assert.equal(
+      firstEventAfterContinue.event,
+      "stopped",
+      `Expected continue to pause at breakpoint before exit; got ${firstEventAfterContinue.event}`,
+    );
+    assert.equal(
+      firstEventAfterContinue.body?.reason,
+      "breakpoint",
+      `Expected first stop after continue to be 'breakpoint'; got '${String(firstEventAfterContinue.body?.reason)}'`,
     );
 
     const threads = await client.request("threads", {});
@@ -788,6 +1137,10 @@ async function runDapHappyPathE2E(
     const disconnect = await client.request("disconnect", { restart: false });
     assert.equal(disconnect.success, true);
   } finally {
+    if (stderrOutput.trim().length > 0) {
+      console.error("[dap-e2e][adapter-stderr]\n" + stderrOutput.trim());
+    }
+    console.error("[dap-e2e][last-protocol-messages]\n" + client.formatRecentTranscript(40));
     client.dispose();
   }
 }

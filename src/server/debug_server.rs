@@ -22,12 +22,15 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{error, info, warn};
 
 pub struct DebugServer {
+    host: String,
     engine: Option<DebuggerEngine>,
     token: Option<String>,
     tls_config: Option<ServerConfig>,
     pending_execution: Option<PendingExecution>,
     shutdown: Arc<Notify>,
     contract_wasm: Option<Vec<u8>>,
+    repeat_count: Option<u32>,
+    storage_filter: Vec<String>,
 }
 
 struct PendingExecution {
@@ -37,32 +40,38 @@ struct PendingExecution {
 
 impl DebugServer {
     pub fn new(
+        host: String,
         token: Option<String>,
         cert_path: Option<&Path>,
         key_path: Option<&Path>,
+        repeat_count: Option<u32>,
+        storage_filter: Vec<String>,
     ) -> Result<Self> {
         let tls_config = match (cert_path, key_path) {
             (Some(cp), Some(kp)) => Some(load_tls_config(cp, kp)?),
             (None, None) => None,
             _ => {
                 return Err(miette::miette!(
-                    "TLS not supported unless both certificate and key are provided"
+                    "TLS requires both certificate and key paths (--tls-cert and --tls-key). Provide both flags together, or remove both flags to run without native TLS."
                 ));
             }
         };
 
         Ok(Self {
+            host,
             engine: None,
             token,
             tls_config,
             pending_execution: None,
             shutdown: Arc::new(Notify::new()),
             contract_wasm: None,
+            repeat_count,
+            storage_filter,
         })
     }
 
     pub async fn run(mut self, port: u16) -> Result<()> {
-        let addr = format!("0.0.0.0:{}", port);
+        let addr = format!("{}:{}", self.host, port);
         let listener = TcpListener::bind(&addr)
             .await
             .map_err(|e| miette::miette!("Failed to bind to {}: {}", addr, e))?;
@@ -183,8 +192,29 @@ impl DebugServer {
                 .map_err(|_| miette::miette!("Connection closed"))
         };
 
+        let mut idle_timeout = None;
+        let mut _heartbeat_timer = None;
+
         loop {
-            let line = match rx_in.recv().await {
+            let next_message = if let Some(timeout) = idle_timeout {
+                match tokio::time::timeout(
+                    std::time::Duration::from_millis(timeout as u64),
+                    rx_in.recv(),
+                )
+                .await
+                {
+                    Ok(res) => res,
+                    Err(_) => {
+                        warn!("Idle timeout reached for connection");
+                        let _ = send_msg(DebugMessage::response(0, DebugResponse::Disconnected));
+                        return Ok(());
+                    }
+                }
+            } else {
+                rx_in.recv().await
+            };
+
+            let line = match next_message {
                 Some(l) => l,
                 None => break,
             };
@@ -195,8 +225,7 @@ impl DebugServer {
                 Err(e) => {
                     warn!("Failed to parse request: {}", e);
                     let response = DebugMessage::response(
-                        0, // ID might be unknown if parse failed, but often it's available.
-                        // For now use 0 or try to extract it if possible.
+                        0,
                         DebugResponse::Error {
                             message: format!("Malformed request: {}", e),
                         },
@@ -234,6 +263,8 @@ impl DebugServer {
                 client_version,
                 protocol_min,
                 protocol_max,
+                heartbeat_interval_ms,
+                idle_timeout_ms,
             } = &request
             {
                 let server_name = "soroban-debug".to_string();
@@ -242,6 +273,33 @@ impl DebugServer {
                 match negotiate_protocol_version(*protocol_min, *protocol_max) {
                     Ok(selected_version) => {
                         handshake_done = true;
+                        // Support heartbeat/timeout negotiation
+                        idle_timeout = *idle_timeout_ms;
+
+                        if let Some(interval) = *heartbeat_interval_ms {
+                            info!("Negotiated heartbeat interval: {}ms", interval);
+                            let tx_heartbeat = tx_out.clone();
+                            let interval_ms = interval as u64;
+                            _heartbeat_timer = Some(tokio::spawn(async move {
+                                let mut interval_timer = tokio::time::interval(
+                                    std::time::Duration::from_millis(interval_ms),
+                                );
+                                // Avoid immediate tick if possible, though tokio interval ticks first.
+                                interval_timer.tick().await;
+
+                                loop {
+                                    interval_timer.tick().await;
+                                    let ping = DebugMessage::request(0, DebugRequest::Ping);
+                                    if tx_heartbeat.send(ping).is_err() {
+                                        break;
+                                    }
+                                }
+                            }));
+                        }
+                        if let Some(timeout) = idle_timeout {
+                            info!("Negotiated idle timeout: {}ms", timeout);
+                        }
+
                         let response = DebugMessage::response(
                             message.id,
                             DebugResponse::HandshakeAck {
@@ -250,6 +308,8 @@ impl DebugServer {
                                 protocol_min: PROTOCOL_MIN_VERSION,
                                 protocol_max: PROTOCOL_MAX_VERSION,
                                 selected_version,
+                                heartbeat_interval_ms: *heartbeat_interval_ms,
+                                idle_timeout_ms: idle_timeout,
                             },
                         );
                         send_msg(response)?;
@@ -275,7 +335,12 @@ impl DebugServer {
                 }
             }
 
-            // Backward compatibility: allow Authenticate before handshake.
+            // BACKWARD COMPATIBILITY (intentional): Allow `Authenticate` to succeed before
+            // the protocol `Handshake` is completed. Older clients (pre-handshake protocol)
+            // send `Authenticate` as their first message. Removing or reordering this block
+            // would break those clients silently. Any change here MUST be accompanied by an
+            // update to the parity test `parity_dap_auth_before_handshake_is_accepted` in
+            // tests/parity_tests.rs and a version bump in src/server/protocol.rs.
             if let DebugRequest::Authenticate { token } = &request {
                 let success = self
                     .token
@@ -377,6 +442,7 @@ impl DebugServer {
                     source_path,
                     lines,
                     exported_functions,
+                    max_forward_line_adjust,
                 } => match (self.engine.as_ref(), self.contract_wasm.as_deref()) {
                     (Some(engine), Some(wasm_bytes)) => {
                         if let Some(source_map) = engine.source_map() {
@@ -387,6 +453,7 @@ impl DebugServer {
                                 Path::new(&source_path),
                                 &lines,
                                 &exported,
+                                max_forward_line_adjust,
                             );
                             DebugResponse::SourceBreakpointsResolved { breakpoints }
                         } else {
@@ -409,69 +476,241 @@ impl DebugServer {
                         message: "No contract loaded".to_string(),
                     },
                 },
-                DebugRequest::Execute { function, args } => match self.engine.as_mut() {
-                    Some(engine) if engine.breakpoints().should_break(&function) => {
-                        match current_storage(engine) {
-                            Ok(storage) => match engine.breakpoints_mut().on_hit(
-                                &function,
-                                &storage,
-                                args.as_deref(),
-                            ) {
-                                Ok(Some(hit)) => {
-                                    for message in hit.log_messages {
-                                        println!("{message}");
-                                    }
-
-                                    if hit.should_pause {
-                                        engine.prepare_breakpoint_stop(&function, args.as_deref());
-                                        self.pending_execution =
-                                            Some(PendingExecution { function, args });
-                                        DebugResponse::ExecutionResult {
+                DebugRequest::Execute { function, args } => {
+                    if let Some(count) = self.repeat_count {
+                        if count > 1 {
+                            if let Some(wasm) = &self.contract_wasm {
+                                let breakpoints = self
+                                    .engine
+                                    .as_ref()
+                                    .map(|e| e.breakpoints().list())
+                                    .unwrap_or_default();
+                                let initial_storage = self
+                                    .engine
+                                    .as_ref()
+                                    .and_then(|e| e.executor().get_storage_snapshot().ok())
+                                    .and_then(|s| serde_json::to_string(&s).ok());
+                                let runner = crate::repeat::RepeatRunner::new(
+                                    wasm.clone(),
+                                    breakpoints,
+                                    initial_storage,
+                                );
+                                match runner.run(&function, args.as_deref(), count) {
+                                    Ok(stats) => {
+                                        let output = format!(
+                                            "--- Repeat Execution ({} runs) ---\n\nDuration:\n  Min: {:.2}ms, Max: {:.2}ms, Avg: {:.2}ms\n\nCPU Instructions:\n  Min: {}, Max: {}, Avg: {}\n\nMemory (bytes):\n  Min: {}, Max: {}, Avg: {}\n\nResults: {}",
+                                            count,
+                                            stats.min_duration.as_secs_f64() * 1000.0,
+                                            stats.max_duration.as_secs_f64() * 1000.0,
+                                            stats.avg_duration.as_secs_f64() * 1000.0,
+                                            stats.min_cpu,
+                                            stats.max_cpu,
+                                            stats.avg_cpu,
+                                            stats.min_memory,
+                                            stats.max_memory,
+                                            stats.avg_memory,
+                                            if stats.inconsistent_results {
+                                                "INCONSISTENT"
+                                            } else {
+                                                "CONSISTENT"
+                                            }
+                                        );
+                                        let resp = DebugResponse::ExecutionResult {
                                             success: true,
-                                            output: String::new(),
+                                            output,
                                             error: None,
-                                            paused: true,
-                                            completed: false,
+                                            paused: false,
+                                            completed: true,
                                             source_location: None,
+                                        };
+                                        send_msg(DebugMessage::response(message.id, resp))?;
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        let resp = DebugResponse::Error {
+                                            message: e.to_string(),
+                                        };
+                                        send_msg(DebugMessage::response(message.id, resp))?;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                DebugResponse::Error {
+                                    message: "No contract loaded for repeat execution".to_string(),
+                                }
+                            }
+                        } else {
+                            match self.engine.as_mut() {
+                                Some(engine) => {
+                                    if engine.breakpoints().should_break(&function) {
+                                        match current_storage(engine) {
+                                            Ok(storage) => match engine.breakpoints_mut().on_hit(
+                                                &function,
+                                                &storage,
+                                                args.as_deref(),
+                                            ) {
+                                                Ok(Some(hit)) => {
+                                                    for message in hit.log_messages {
+                                                        println!("{message}");
+                                                    }
+                                                    if hit.should_pause {
+                                                        engine.prepare_breakpoint_stop(
+                                                            &function,
+                                                            args.as_deref(),
+                                                        );
+                                                        self.pending_execution =
+                                                            Some(PendingExecution {
+                                                                function: function.clone(),
+                                                                args: args.clone(),
+                                                            });
+                                                        DebugResponse::ExecutionResult {
+                                                            success: true,
+                                                            output: "Paused at function breakpoint"
+                                                                .to_string(),
+                                                            error: None,
+                                                            paused: true,
+                                                            completed: false,
+                                                            source_location: engine
+                                                                .current_source_location()
+                                                                .map(Into::into),
+                                                        }
+                                                    } else {
+                                                        is_executing.store(
+                                                            true,
+                                                            std::sync::atomic::Ordering::SeqCst,
+                                                        );
+                                                        let resp = execute_without_breakpoints(
+                                                            engine, &function, args,
+                                                        );
+                                                        is_executing.store(
+                                                            false,
+                                                            std::sync::atomic::Ordering::SeqCst,
+                                                        );
+                                                        resp
+                                                    }
+                                                }
+                                                Ok(None) => {
+                                                    is_executing.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    let resp = execute_without_breakpoints(
+                                                        engine, &function, args,
+                                                    );
+                                                    is_executing.store(
+                                                        false,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    resp
+                                                }
+                                                Err(e) => DebugResponse::Error {
+                                                    message: e.to_string(),
+                                                },
+                                            },
+                                            Err(e) => DebugResponse::Error {
+                                                message: e.to_string(),
+                                            },
                                         }
                                     } else {
-                                        {
-                                            is_executing
-                                                .store(true, std::sync::atomic::Ordering::SeqCst);
-                                            let r = execute_without_breakpoints(
-                                                engine, &function, args,
-                                            );
-                                            is_executing
-                                                .store(false, std::sync::atomic::Ordering::SeqCst);
-                                            r
-                                        }
+                                        is_executing
+                                            .store(true, std::sync::atomic::Ordering::SeqCst);
+                                        let resp =
+                                            execute_without_breakpoints(engine, &function, args);
+                                        is_executing
+                                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                                        resp
                                     }
                                 }
-                                Ok(None) => {
-                                    is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                                    let r = execute_without_breakpoints(engine, &function, args);
-                                    is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
-                                    r
-                                }
-                                Err(e) => DebugResponse::Error {
-                                    message: e.to_string(),
+                                None => DebugResponse::Error {
+                                    message: "No contract engine initialized".to_string(),
                                 },
-                            },
-                            Err(e) => DebugResponse::Error {
-                                message: e.to_string(),
+                            }
+                        }
+                    } else {
+                        match self.engine.as_mut() {
+                            Some(engine) => {
+                                if engine.breakpoints().should_break(&function) {
+                                    match current_storage(engine) {
+                                        Ok(storage) => match engine.breakpoints_mut().on_hit(
+                                            &function,
+                                            &storage,
+                                            args.as_deref(),
+                                        ) {
+                                            Ok(Some(hit)) => {
+                                                for message in hit.log_messages {
+                                                    println!("{message}");
+                                                }
+                                                if hit.should_pause {
+                                                    engine.prepare_breakpoint_stop(
+                                                        &function,
+                                                        args.as_deref(),
+                                                    );
+                                                    self.pending_execution =
+                                                        Some(PendingExecution {
+                                                            function: function.clone(),
+                                                            args: args.clone(),
+                                                        });
+                                                    DebugResponse::ExecutionResult {
+                                                        success: true,
+                                                        output: "Paused at function breakpoint"
+                                                            .to_string(),
+                                                        error: None,
+                                                        paused: true,
+                                                        completed: false,
+                                                        source_location: engine
+                                                            .current_source_location()
+                                                            .map(Into::into),
+                                                    }
+                                                } else {
+                                                    is_executing.store(
+                                                        true,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    let resp = execute_without_breakpoints(
+                                                        engine, &function, args,
+                                                    );
+                                                    is_executing.store(
+                                                        false,
+                                                        std::sync::atomic::Ordering::SeqCst,
+                                                    );
+                                                    resp
+                                                }
+                                            }
+                                            Ok(None) => {
+                                                is_executing.store(
+                                                    true,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                let resp = execute_without_breakpoints(
+                                                    engine, &function, args,
+                                                );
+                                                is_executing.store(
+                                                    false,
+                                                    std::sync::atomic::Ordering::SeqCst,
+                                                );
+                                                resp
+                                            }
+                                            Err(e) => DebugResponse::Error {
+                                                message: e.to_string(),
+                                            },
+                                        },
+                                        Err(e) => DebugResponse::Error {
+                                            message: e.to_string(),
+                                        },
+                                    }
+                                } else {
+                                    is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
+                                    let resp = execute_without_breakpoints(engine, &function, args);
+                                    is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
+                                    resp
+                                }
+                            }
+                            None => DebugResponse::Error {
+                                message: "No contract engine initialized".to_string(),
                             },
                         }
                     }
-                    Some(engine) => {
-                        is_executing.store(true, std::sync::atomic::Ordering::SeqCst);
-                        let r = execute_without_breakpoints(engine, &function, args);
-                        is_executing.store(false, std::sync::atomic::Ordering::SeqCst);
-                        r
-                    }
-                    None => DebugResponse::Error {
-                        message: "No contract loaded".to_string(),
-                    },
-                },
+                }
                 DebugRequest::Step | DebugRequest::StepIn => match self.engine.as_mut() {
                     Some(engine) => match engine.step_into() {
                         Ok(_) => {
@@ -489,7 +728,7 @@ impl DebugServer {
                                 paused: engine.is_paused(),
                                 current_function,
                                 step_count,
-                                source_location: None,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -517,7 +756,7 @@ impl DebugServer {
                                 paused: engine.is_paused(),
                                 current_function,
                                 step_count,
-                                source_location: None,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -557,7 +796,9 @@ impl DebugServer {
                                     paused: false,
                                     current_function,
                                     step_count,
-                                    source_location: None,
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                                 Err(e) => DebugResponse::Error {
                                     message: e.to_string(),
@@ -580,7 +821,9 @@ impl DebugServer {
                                         paused: engine.is_paused(),
                                         current_function,
                                         step_count,
-                                        source_location: None,
+                                        source_location: engine
+                                            .current_source_location()
+                                            .map(Into::into),
                                     }
                                 }
                                 Err(e) => DebugResponse::Error {
@@ -631,14 +874,18 @@ impl DebugServer {
                                     output: Some(output),
                                     error: None,
                                     paused: false,
-                                    source_location: None,
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
                                     output: None,
                                     error: Some(e.to_string()),
                                     paused: false,
-                                    source_location: None,
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                             }
                         } else {
@@ -648,14 +895,18 @@ impl DebugServer {
                                     output: None,
                                     error: None,
                                     paused: engine.is_paused(),
-                                    source_location: None,
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                                 Err(e) => DebugResponse::ContinueResult {
                                     completed: false,
                                     output: None,
                                     error: Some(e.to_string()),
                                     paused: engine.is_paused(),
-                                    source_location: None,
+                                    source_location: engine
+                                        .current_source_location()
+                                        .map(Into::into),
                                 },
                             }
                         }
@@ -680,13 +931,18 @@ impl DebugServer {
                                     format!("{}{}", frame.function, suffix)
                                 })
                                 .collect();
+                            let function = state.current_function().map(|s| s.to_string());
+                            let args = state.current_args().map(|s| s.to_string());
+                            let step_count = state.step_count() as u64;
+                            drop(state);
+
                             DebugResponse::InspectionResult {
-                                function: state.current_function().map(|s| s.to_string()),
-                                args: state.current_args().map(|s| s.to_string()),
-                                step_count: state.step_count() as u64,
+                                function,
+                                args,
+                                step_count,
                                 paused: engine.is_paused(),
                                 call_stack,
-                                source_location: None,
+                                source_location: engine.current_source_location().map(Into::into),
                             }
                         }
                         Err(e) => DebugResponse::Error {
@@ -699,12 +955,21 @@ impl DebugServer {
                 },
                 DebugRequest::GetStorage => match self.engine.as_ref() {
                     Some(engine) => match engine.executor().get_storage_snapshot() {
-                        Ok(snapshot) => match serde_json::to_string(&snapshot) {
-                            Ok(json) => DebugResponse::StorageState { storage_json: json },
-                            Err(e) => DebugResponse::Error {
-                                message: format!("Failed to serialize storage snapshot: {}", e),
-                            },
-                        },
+                        Ok(mut snapshot) => {
+                            if !self.storage_filter.is_empty() {
+                                if let Ok(filter) = crate::inspector::storage::StorageFilter::new(
+                                    &self.storage_filter,
+                                ) {
+                                    snapshot.retain(|k, _| filter.matches(k));
+                                }
+                            }
+                            match serde_json::to_string(&snapshot) {
+                                Ok(json) => DebugResponse::StorageState { storage_json: json },
+                                Err(e) => DebugResponse::Error {
+                                    message: format!("Failed to serialize storage snapshot: {}", e),
+                                },
+                            }
+                        }
                         Err(e) => DebugResponse::Error {
                             message: e.to_string(),
                         },
@@ -843,6 +1108,17 @@ impl DebugServer {
                         log_points: true,
                     },
                 },
+                DebugRequest::GetEvents => match self.engine.as_ref() {
+                    Some(engine) => match engine.executor().get_dynamic_trace() {
+                        Ok(events) => DebugResponse::EventsList { events },
+                        Err(e) => DebugResponse::Error {
+                            message: e.to_string(),
+                        },
+                    },
+                    None => DebugResponse::Error {
+                        message: "No contract loaded".to_string(),
+                    },
+                },
                 DebugRequest::SetStorage { storage_json } => match self.engine.as_mut() {
                     Some(engine) => match engine.executor_mut().set_initial_storage(storage_json) {
                         Ok(_) => match engine.executor().get_storage_snapshot() {
@@ -971,7 +1247,7 @@ fn execute_without_breakpoints(
             error: None,
             paused: engine.is_paused(),
             completed: true,
-            source_location: None,
+            source_location: engine.current_source_location().map(Into::into),
         },
         Err(e) => DebugResponse::ExecutionResult {
             success: false,
@@ -979,7 +1255,7 @@ fn execute_without_breakpoints(
             error: Some(e.to_string()),
             paused: false,
             completed: true,
-            source_location: None,
+            source_location: engine.current_source_location().map(Into::into),
         },
     }
 }
@@ -1029,7 +1305,10 @@ fn summarize_request(request: &DebugRequest) -> String {
 }
 
 async fn setup_signal_handlers(shutdown: Arc<Notify>) {
+    #[cfg(unix)]
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    #[cfg(not(unix))]
+    let ctrl_c = tokio::signal::ctrl_c();
 
     #[cfg(unix)]
     {
@@ -1080,7 +1359,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_graceful_shutdown_on_signal() {
-        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        let server = DebugServer::new("127.0.0.1".to_string(), None, None, None, None, Vec::new())
+            .expect("Failed to create server");
         let shutdown = server.shutdown.clone();
 
         let local = tokio::task::LocalSet::new();
@@ -1103,7 +1383,9 @@ mod tests {
 
     #[test]
     fn test_server_initialization() {
-        let server = DebugServer::new(None, None, None).expect("Failed to create server");
+        let server = DebugServer::new("127.0.0.1".to_string(), None, None, None, None, Vec::new())
+            .expect("Failed to create server");
+        assert_eq!(server.host, "127.0.0.1");
         assert!(server.engine.is_none());
         assert!(server.token.is_none());
         assert!(server.tls_config.is_none());
@@ -1112,8 +1394,40 @@ mod tests {
     #[test]
     fn test_server_with_token() {
         let token = "test-token-12345678".to_string();
-        let server =
-            DebugServer::new(Some(token.clone()), None, None).expect("Failed to create server");
+        let server = DebugServer::new(
+            "127.0.0.1".to_string(),
+            Some(token.clone()),
+            None,
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect("Failed to create server");
         assert_eq!(server.token, Some(token));
+    }
+
+    #[test]
+    fn test_server_rejects_partial_tls_configuration() {
+        let result = DebugServer::new(
+            "127.0.0.1".to_string(),
+            None,
+            Some(Path::new("cert.pem")),
+            None,
+            None,
+            Vec::new(),
+        );
+        assert!(
+            result.is_err(),
+            "Expected partial TLS configuration to fail"
+        );
+        let err = result
+            .err()
+            .unwrap_or_else(|| miette::miette!("missing error"));
+
+        assert!(
+            err.to_string()
+                .contains("TLS requires both certificate and key paths"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -1,11 +1,61 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+#[cfg(feature = "network-tests")]
 use std::path::PathBuf;
+#[cfg(feature = "network-tests")]
 use std::process::Command as StdCommand;
+#[cfg(feature = "network-tests")]
 use std::time::Duration;
 
+#[cfg(feature = "network-tests")]
+mod network;
+
 #[test]
+fn test_server_cli_rejects_tls_cert_without_key() {
+    let mut cmd: Command = assert_cmd::cargo::cargo_bin_cmd!("soroban-debug");
+    cmd.arg("server")
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg("9230")
+        .arg("--tls-cert")
+        .arg("missing-cert.pem")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "TLS requires both certificate and key paths",
+        ));
+}
+
+#[test]
+fn test_server_cli_rejects_tls_key_without_cert() {
+    let mut cmd: Command = assert_cmd::cargo::cargo_bin_cmd!("soroban-debug");
+    cmd.arg("server")
+        .arg("--host")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg("9231")
+        .arg("--tls-key")
+        .arg("missing-key.pem")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "TLS requires both certificate and key paths",
+        ));
+}
+
+#[test]
+#[cfg(feature = "network-tests")]
 fn test_remote_run_execution() {
+    if !network::can_bind_loopback() {
+        eprintln!(
+            "Skipping test_remote_run_execution: loopback networking restricted \
+             (EPERM or equivalent) – cannot bind/connect on 127.0.0.1. \
+             See docs/remote-troubleshooting.md."
+        );
+        return;
+    }
+
     fn fixture_wasm_path(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
@@ -45,13 +95,18 @@ fn test_remote_run_execution() {
         wasm_path
     }
 
+    // Allocate an ephemeral free port for this test.
+    let port = network::allocate_ephemeral_port().expect("Failed to allocate ephemeral port");
+
     // Start server in background
     let mut server_cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("soroban-debug"));
 
     let mut server_child = server_cmd
         .arg("server")
+        .arg("--host")
+        .arg("127.0.0.1")
         .arg("--port")
-        .arg("9245")
+        .arg(port.to_string())
         .arg("--token")
         .arg("secret")
         .spawn()
@@ -65,7 +120,7 @@ fn test_remote_run_execution() {
     ping_cmd
         .arg("run")
         .arg("--remote")
-        .arg("127.0.0.1:9245")
+        .arg(format!("127.0.0.1:{}", port))
         .arg("--token")
         .arg("secret")
         .assert()
@@ -79,7 +134,7 @@ fn test_remote_run_execution() {
     let assert = client_cmd
         .arg("run")
         .arg("--remote")
-        .arg("127.0.0.1:9245")
+        .arg(format!("127.0.0.1:{}", port))
         .arg("--token")
         .arg("secret")
         .arg("--contract")

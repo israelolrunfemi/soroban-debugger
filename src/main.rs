@@ -243,6 +243,42 @@ fn main() -> miette::Result<()> {
                             message.push_str(&format!("  - {}\n", fmt.name));
                         }
                     }
+
+                    let command_conflicts =
+                        soroban_debugger::plugin::registry::global_command_conflicts();
+                    if !command_conflicts.is_empty() {
+                        let mut conflict_entries: Vec<_> = command_conflicts.iter().collect();
+                        conflict_entries.sort_by_key(|(a, _)| *a);
+                        message.push_str("\nPlugin command collisions detected:\n");
+                        for (cmd, providers) in conflict_entries {
+                            if providers.len() > 1 {
+                                message.push_str(&format!(
+                                    "  - {}: winner {} ignored {}\n",
+                                    cmd,
+                                    providers[0],
+                                    providers[1..].join(", ")
+                                ));
+                            }
+                        }
+                    }
+
+                    let formatter_conflicts =
+                        soroban_debugger::plugin::registry::global_formatter_conflicts();
+                    if !formatter_conflicts.is_empty() {
+                        let mut conflict_entries: Vec<_> = formatter_conflicts.iter().collect();
+                        conflict_entries.sort_by_key(|(a, _)| *a);
+                        message.push_str("\nPlugin formatter collisions detected:\n");
+                        for (formatter, providers) in conflict_entries {
+                            if providers.len() > 1 {
+                                message.push_str(&format!(
+                                    "  - {}: winner {} ignored {}\n",
+                                    formatter,
+                                    providers[0],
+                                    providers[1..].join(", ")
+                                ));
+                            }
+                        }
+                    }
                     Err(soroban_debugger::DebuggerError::ExecutionError(message).into())
                 }
                 Err(e) => {
@@ -259,10 +295,10 @@ fn main() -> miette::Result<()> {
                         functions: true,
                         metadata: false,
                         format: soroban_debugger::cli::args::OutputFormat::Pretty,
-                        expected_hash: None,
-                        dependency_graph: None,
                         source_map_diagnostics: false,
                         source_map_limit: 20,
+                        expected_hash: None,
+                        dependency_graph: None,
                     },
                     verbosity,
                 );
