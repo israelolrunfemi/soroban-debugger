@@ -54,6 +54,19 @@ impl ReplCommand {
         ]
     }
 
+    /// Returns true if the command contains sensitive data (e.g. tokens, keys)
+    /// and should be excluded from persistent history.
+    pub fn is_sensitive(&self) -> bool {
+        match self {
+            ReplCommand::Call { args, .. } => args.iter().any(|arg| {
+                let lower = arg.to_lowercase();
+                lower.contains("secret") || lower.contains("token") 
+                    || lower.contains("key") || lower.contains("password")
+            }),
+            _ => false,
+        }
+    }
+
     /// Parse a command string into a ReplCommand
     pub fn parse(input: &str) -> Result<Self> {
         let trimmed = input.trim();

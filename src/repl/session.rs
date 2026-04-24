@@ -22,6 +22,7 @@ pub struct ReplSession {
     config: ReplConfig,
     executor: ReplExecutor,
     history_path: PathBuf,
+    save_history: bool,
 }
 
 #[derive(Clone)]
@@ -116,15 +117,22 @@ impl Completer for ReplHelper {
 impl ReplSession {
     /// Create a new REPL session
     pub fn new(config: ReplConfig) -> Result<Self> {
-        let history_base_dir = dirs::home_dir().unwrap_or_else(|| {
-            let fallback_dir = std::env::temp_dir();
-            tracing::warn!(
-                "HOME directory is unavailable; REPL history will be stored in temporary directory: {}",
-                fallback_dir.display()
-            );
-            fallback_dir
-        });
-        let history_path = history_base_dir.join(".soroban_repl_history");
+        let global_config = crate::config::Config::load_or_default();
+        let save_history = global_config.repl.save_history.unwrap_or(true);
+        
+        let history_path = if let Some(path) = global_config.repl.history_file {
+            PathBuf::from(path)
+        } else {
+            let history_base_dir = dirs::home_dir().unwrap_or_else(|| {
+                let fallback_dir = std::env::temp_dir();
+                tracing::warn!(
+                    "HOME directory is unavailable; REPL history will be stored in temporary directory: {}",
+                    fallback_dir.display()
+                );
+                fallback_dir
+            });
+            history_base_dir.join(".soroban_repl_history")
+        };
 
         let executor = ReplExecutor::new(&config)?;
         let helper = ReplHelper::new(
@@ -139,14 +147,17 @@ impl ReplSession {
             .map_err(|e| miette::miette!("Failed to initialize REPL editor: {}", e))?;
         editor.set_helper(Some(helper));
 
-        // Load history if it exists
-        let _ = editor.load_history(&history_path);
+        if save_history {
+            // Load history if it exists
+            let _ = editor.load_history(&history_path);
+        }
 
         Ok(ReplSession {
             editor,
             config,
             executor,
             history_path,
+            save_history,
         })
     }
 
@@ -176,13 +187,27 @@ impl ReplSession {
                         continue;
                     }
 
-                    // Add to history
-                    let _ = self.editor.add_history_entry(line.clone());
+                    match ReplCommand::parse(&line) {
+                        Ok(cmd) => {
+                            if self.save_history && !cmd.is_sensitive() {
+                                let _ = self.editor.add_history_entry(line.clone());
+                            }
 
-                    match self.execute_command(&line).await {
-                        Ok(true) => break, // Exit requested
-                        Ok(false) => {}    // Continue
+                            match self.execute_parsed_command(cmd).await {
+                                Ok(true) => break, // Exit requested
+                                Ok(false) => {}    // Continue
+                                Err(e) => {
+                                    tracing::error!(
+                                        "{}",
+                                        Formatter::error(format!("Error: {}", e).as_str())
+                                    );
+                                }
+                            }
+                        }
                         Err(e) => {
+                            if self.save_history {
+                                let _ = self.editor.add_history_entry(line.clone());
+                            }
                             tracing::error!(
                                 "{}",
                                 Formatter::error(format!("Error: {}", e).as_str())
@@ -204,16 +229,16 @@ impl ReplSession {
             }
         }
 
-        // Save history
-        let _ = self.editor.save_history(&self.history_path);
+        if self.save_history {
+            // Save history
+            let _ = self.editor.save_history(&self.history_path);
+        }
 
         Ok(())
     }
 
-    /// Execute a single command
-    async fn execute_command(&mut self, line: &str) -> Result<bool> {
-        let cmd = ReplCommand::parse(line)?;
-
+    /// Execute a single parsed command
+    async fn execute_parsed_command(&mut self, cmd: ReplCommand) -> Result<bool> {
         match cmd {
             ReplCommand::Noop => Ok(false),
             ReplCommand::Exit => Ok(true),
