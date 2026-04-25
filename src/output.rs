@@ -216,6 +216,59 @@ impl PluginReloadReport {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchResultKind {
+    Passed,
+    Failed,
+    Panicked,
+    TimedOut,
+    Skipped,
+    Error,
+}
+
+impl BatchResultKind {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Passed => "Passed",
+            Self::Failed => "Failed",
+            Self::Panicked => "Panicked",
+            Self::TimedOut => "Timed Out",
+            Self::Skipped => "Skipped",
+            Self::Error => "Error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchResult {
+    pub label: String,
+    pub kind: BatchResultKind,
+    pub args: String,
+    pub result: Option<String>,
+    pub expected: Option<String>,
+    pub error: Option<String>,
+    pub duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct BatchSummary {
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub panicked: usize,
+    pub timed_out: usize,
+    pub skipped: usize,
+    pub errors: usize,
+    pub total_duration_ms: u128,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchExecutionResult {
+    pub summary: BatchSummary,
+    pub results: Vec<BatchResult>,
+}
+
 pub fn collect_runtime_diagnostics(
     source_map_loaded: bool,
     budget: &crate::inspector::budget::BudgetInfo,
