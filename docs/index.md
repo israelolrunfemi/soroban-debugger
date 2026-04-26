@@ -32,6 +32,7 @@ Welcome to the Soroban Debugger documentation. This index helps you navigate the
 - [Plugin Development Tutorial](tutorials/plugin-development.md) — Build, install, and iterate on a plugin end-to-end.
 - [Symbolic Analysis Budgets](tutorials/symbolic-analysis-budgets.md) — Configuring symbolic exploration.
 - [Understanding Budget Trends](tutorials/understanding-budget.md) — Visualizing resource usage.
+- [Remote Debugging in CI](tutorials/ci-remote-debugging.md) — Setting up remote debugging in a CI environment.
 
 ## 🤝 Contributing & Community
 - [Contributing Guide](../CONTRIBUTING.md) — How to help improve the debugger.

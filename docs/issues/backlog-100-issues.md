@@ -100,15 +100,15 @@ Roadmap view: [Section D priorities](roadmap-priorities.md#section-d--tutorials)
 - **I-041** `[DOC]` `docs/tutorials/first-debug.md` doesn't reference the `.soroban-debug.toml` config file, which new users would benefit from knowing about early.
 - **I-042** `[DOC]` `docs/tutorials/scenario-runner.md` shows TOML structure but doesn't document all TOML keys (e.g., `timeout`, `expected_events`, `skip`).
 - **I-043** `[DOC]` `docs/tutorials/debug-auth-errors.md` has empty checkbox items that suggest the tutorial is incomplete.
-- **I-044** `[DOC]` `docs/tutorials/symbolic-analysis-budgets.md` doesn't explain how to interpret the exploration report or act on findings.
-- **I-045** `[DOC]` `docs/tutorials/understanding-budget.md` covers CPU/memory budget but doesn't mention the `--budget-trend` flag or history-based regression detection.
+- **I-044** ~`[DOC]` `docs/tutorials/symbolic-analysis-budgets.md` doesn't explain how to interpret the exploration report or act on findings.~
+- **I-045** ~`[DOC]` `docs/tutorials/understanding-budget.md` covers CPU/memory budget but doesn't mention the `--budget-trend` flag or history-based regression detection.~
 - **I-046** `[DOC]` `docs/doc/tutorials/video-token-transfer.md` lives under `docs/doc/tutorials/` rather than `docs/tutorials/` — inconsistent nesting that breaks the docs IA.
 - **I-047** `[IA]` No tutorial covers plugin development end-to-end; `docs/plugin-api.md` is a reference, not a tutorial.
 - **I-048** `[DOC]` No tutorial covers the VS Code extension setup (installing the extension, writing a `launch.json`, setting breakpoints).
 - **I-049** `[DOC]` No tutorial covers using the TUI (`soroban-debug tui`) — the feature is mentioned in the command index but has no guide.
 - **I-050** `[DOC]` No tutorial covers the upgrade-check workflow (building two WASM versions, running the check, interpreting Safe/Caution/Breaking output).
 - **I-051** `[DOC]` No tutorial covers the REPL (`soroban-debug repl`) — how to enter it, issue commands, and exit.
-- **I-052** `[DOC]` No tutorial covers remote debugging in a CI environment (the typical DevOps use case beyond the local SSH-tunnel workaround).
+- **I-052** ~`[DOC]` No tutorial covers remote debugging in a CI environment (the typical DevOps use case beyond the local SSH-tunnel workaround).~
 
 ---
 
