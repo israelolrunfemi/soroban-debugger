@@ -26,6 +26,7 @@ pub struct Scenario {
 
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ScenarioDefaults {
+    #[serde(alias = "timeout")]
     pub timeout_secs: Option<u64>,
 }
 
@@ -34,6 +35,7 @@ pub struct ScenarioStep {
     pub name: Option<String>,
     pub function: String,
     pub args: Option<String>,
+    #[serde(alias = "timeout")]
     pub timeout_secs: Option<u64>,
     pub expected_return: Option<String>,
     pub expected_storage: Option<HashMap<String, String>>,
@@ -49,6 +51,8 @@ pub struct ScenarioStep {
     pub capture: Option<String>,
     pub tags: Option<Vec<String>>,
     pub notes: Option<String>,
+    #[serde(default)]
+    pub skip: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -185,6 +189,14 @@ pub fn run_scenario(args: ScenarioArgs, _verbosity: Verbosity) -> Result<()> {
                 );
                 continue;
             }
+        }
+
+        if step.skip {
+            println!(
+                "{}",
+                Formatter::info(format!("Skipping Step {} ({}): skip field set to true", i + 1, step_label))
+            );
+            continue;
         }
 
         let effective_timeout = resolve_step_timeout(
@@ -636,6 +648,23 @@ mod tests {
         );
         assert_eq!(scenario.steps[1].tags.as_deref(), Some(vec!["smoke".to_string(), "fast".to_string()].as_slice()));
         assert_eq!(scenario.steps[1].notes.as_deref(), Some("This step is important"));
+    }
+
+    #[test]
+    fn test_skip_field_deserialization() {
+        let toml_str = r#"
+            [[steps]]
+            function = "skipped"
+            skip = true
+
+            [[steps]]
+            function = "run"
+            skip = false
+        "#;
+
+        let scenario: Scenario = toml::from_str(toml_str).unwrap();
+        assert!(scenario.steps[0].skip);
+        assert!(!scenario.steps[1].skip);
     }
 
     #[test]
