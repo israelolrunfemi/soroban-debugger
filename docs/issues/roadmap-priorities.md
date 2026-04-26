@@ -106,7 +106,7 @@ useful order instead of re-triaging the whole epic every time.
 | I-041 | Reference `.soroban-debug.toml` in `first-debug.md` | P1 | XS | Docs | I-004 | 2 |
 | I-042 | Document all TOML keys in `scenario-runner.md` | P1 | M | Docs | — | 2 |
 | I-043 | Complete empty checklist items in `debug-auth-errors.md` | P0 | S | Docs | — | 1 |
-| I-044 | Add report interpretation to `symbolic-analysis-budgets.md` | P2 | M | Docs | — | 2 |
+| I-044 | ~Add report interpretation to `symbolic-analysis-budgets.md`~ | P2 | M | Docs | — | 2 |
 | I-045 | ~Add `--budget-trend` flag coverage to `understanding-budget.md`~ | P1 | S | Docs | — | 2 |
 | I-046 | Relocate `docs/doc/tutorials/video-token-transfer.md` to `docs/tutorials/` | P1 | XS | Docs | I-007 | 1 |
 | I-047 | Write end-to-end plugin development tutorial | P2 | L | Docs | I-030, I-026 | 3 |
