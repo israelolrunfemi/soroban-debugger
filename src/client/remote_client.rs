@@ -366,11 +366,24 @@ impl RemoteClient {
 
         match response {
             DebugResponse::HandshakeAck {
-                selected_version, ..
+                selected_version,
+                server_capabilities,
+                ..
             } => {
                 self.selected_protocol_version = Some(selected_version);
+                self.negotiated_capabilities = Some(server_capabilities);
                 Ok(selected_version)
             }
+            DebugResponse::IncompatibleCapabilities {
+                message,
+                missing_capabilities,
+                ..
+            } => Err(DebuggerError::ExecutionError(format!(
+                "Server is missing required capabilities [{}]: {}",
+                missing_capabilities.join(", "),
+                message
+            ))
+            .into()),
             DebugResponse::IncompatibleProtocol { message, .. } => {
                 Err(DebuggerError::ExecutionError(format!(
                     "Incompatible debugger protocol: {}",
@@ -411,6 +424,33 @@ impl RemoteClient {
                 "Unexpected response to authentication".to_string(),
             )
             .into()),
+        }
+    }
+
+    /// Returns an error if `cap_name` is not in the negotiated server capabilities.
+    /// Call this at the top of any method that uses an optional feature.
+    fn require_capability(&self, cap_name: &str) -> Result<()> {
+        let caps = match &self.negotiated_capabilities {
+            Some(c) => c,
+            None => return Ok(()), // handshake not yet done; let the server reject it
+        };
+        let supported = match cap_name {
+            "evaluate" => caps.evaluate,
+            "source_breakpoints" => caps.source_breakpoints,
+            "conditional_breakpoints" => caps.conditional_breakpoints,
+            "snapshot_loading" => caps.snapshot_loading,
+            "dynamic_trace_events" => caps.dynamic_trace_events,
+            "repeat_execution" => caps.repeat_execution,
+            _ => true, // unknown names pass through
+        };
+        if supported {
+            Ok(())
+        } else {
+            Err(DebuggerError::ExecutionError(format!(
+                "Server does not support '{}'. Check server version or capabilities.",
+                cap_name
+            ))
+            .into())
         }
     }
 
@@ -681,6 +721,7 @@ impl RemoteClient {
 
     /// Load network snapshot
     pub fn load_snapshot(&mut self, snapshot_path: &str) -> Result<String> {
+        self.require_capability("snapshot_loading")?;
         let response = self.send_request(DebugRequest::LoadSnapshot {
             snapshot_path: snapshot_path.to_string(),
         })?;
@@ -704,6 +745,7 @@ impl RemoteClient {
         expression: &str,
         frame_id: Option<u64>,
     ) -> Result<(String, Option<String>)> {
+        self.require_capability("evaluate")?;
         let response = self.send_request_with_retry(
             DebugRequest::Evaluate {
                 expression: expression.to_string(),

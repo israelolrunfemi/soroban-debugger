@@ -312,6 +312,15 @@ pub enum DebugResponse {
         protocol_max: u32,
     },
 
+    /// Handshake rejected because the client requires capabilities the server doesn't support.
+    IncompatibleCapabilities {
+        message: String,
+        /// The capability names the client required but the server lacks.
+        missing_capabilities: Vec<String>,
+        /// What the server does support, so the client can report it.
+        server_capabilities: ServerCapabilities,
+    },
+
     /// Authentication result
     Authenticated { success: bool, message: String },
 

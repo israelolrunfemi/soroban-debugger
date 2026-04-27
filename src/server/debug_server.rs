@@ -348,6 +348,29 @@ impl DebugServer {
                         // Support heartbeat/timeout negotiation
                         idle_timeout = *idle_timeout_ms;
 
+                        // --- Capability negotiation (new block) ---
+                        let our_caps = ServerCapabilities::current();
+                        if let Some(required) = required_capabilities {
+                            let missing = required.unsupported_by(&our_caps);
+                            if !missing.is_empty() {
+                                let response = DebugMessage::response(
+                                    message.id,
+                                    DebugResponse::IncompatibleCapabilities {
+                                        message: format!(
+                                            "Server does not support required capabilities: {}. \
+                                             Upgrade the server or disable these features on the client.",
+                                            missing.join(", ")
+                                        ),
+                                        missing_capabilities: missing.iter().map(|s| s.to_string()).collect(),
+                                        server_capabilities: our_caps,
+                                    },
+                                );
+                                send_msg(response)?;
+                                return Ok(());
+                            }
+                        }
+                        // --- end capability negotiation ---
+
                         if let Some(interval) = *heartbeat_interval_ms {
                             info!("Negotiated heartbeat interval: {}ms", interval);
                             let tx_heartbeat = tx_out.clone();
